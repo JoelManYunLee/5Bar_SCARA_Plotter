@@ -1,0 +1,1 @@
+Responsible for doing all of the CV processing, hosting the server and ultimately generating the set of instructions for the firmware to follow.
