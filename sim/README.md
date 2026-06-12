@@ -22,6 +22,8 @@ python simulator.py --mode ik --distance 8 --proximal 6 --distal 9
 - **Mode** — switch between Forward Kinematics (drive `theta1`/`theta2`) and
   Inverse Kinematics (drive pen `X`/`Y`). The inactive mode's sliders show the
   computed read-back values.
+- **Drag the pen** — in Inverse Kinematics mode, click and drag the black pen
+  marker in the plot to move the end effector directly (sliders follow).
 - **d / L1 / L2** — change the geometry live.
 - **Trace** — toggle on to record the pen path as you move it; **Clear** erases it.
 - **Show workspace** — flood the reachable area to visualise the robot's range.

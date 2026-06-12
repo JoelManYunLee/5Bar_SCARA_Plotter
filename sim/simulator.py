@@ -15,6 +15,7 @@ two distal links meet at the shared end effector (the pen).
 Controls (interactive matplotlib window)
   Mode .......... Forward Kinematics  -> drive the two motor angles (theta1/2)
                   Inverse Kinematics  -> drive the end-effector X/Y
+                  (in IK mode you can also drag the pen directly in the plot)
   d ............. distance between the two motors
   L1 ............ proximal link length (motor -> elbow)
   L2 ............ distal link length   (elbow -> pen)
@@ -126,6 +127,7 @@ class Simulator:
         self.mode = self.MODE_FK if mode == "fk" else self.MODE_IK
         self._guard = False             # prevents slider call-back recursion
         self.tracing = False
+        self._dragging = False          # True while the pen is being dragged in IK mode
         self.trace_x: list[float] = []
         self.trace_y: list[float] = []
 
@@ -198,6 +200,12 @@ class Simulator:
         self.b_work.on_clicked(self._on_workspace)
 
         self.status = self.fig.text(0.05, 0.02, "", fontsize=9, family="monospace")
+
+        # drag the pen directly in IK mode
+        self.fig.canvas.mpl_connect("button_press_event", self._on_press)
+        self.fig.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.fig.canvas.mpl_connect("button_release_event", self._on_release)
+
         self._sync_slider_visibility()
 
     def _slider(self, rect, label, vmin, vmax, val):
@@ -243,6 +251,44 @@ class Simulator:
         if self._guard or self.mode != self.MODE_IK:
             return
         self.ee = (self.s_x.val, self.s_y.val)
+        self._redraw()
+
+    # ---- pen dragging (IK mode) ------------------------------------------------
+    def _on_press(self, event):
+        # only grab the pen with the left button, in IK mode, inside the plot
+        if (self.mode != self.MODE_IK or event.inaxes is not self.ax
+                or event.button != 1 or event.xdata is None):
+            return
+        reach = self.bot.l1 + self.bot.l2 + self.bot.d
+        if math.hypot(event.xdata - self.ee[0], event.ydata - self.ee[1]) < reach * 0.06:
+            self._dragging = True
+            self._move_pen(event.xdata, event.ydata)
+
+    def _on_motion(self, event):
+        if not self._dragging or event.inaxes is not self.ax or event.xdata is None:
+            return
+        self._move_pen(event.xdata, event.ydata)
+
+    def _on_release(self, _):
+        self._dragging = False
+
+    def _move_pen(self, x, y):
+        """Drive the pen to (x, y) if reachable, keeping the IK sliders in sync."""
+        if self.bot.inverse((x, y)) is None:
+            return                      # ignore unreachable targets while dragging
+        self.ee = (x, y)
+        self._guard = True              # the slider writes below must not re-enter
+        events_x, draws_x = self.s_x.eventson, self.s_x.drawon
+        events_y, draws_y = self.s_y.eventson, self.s_y.drawon
+        self.s_x.eventson = self.s_x.drawon = False
+        self.s_y.eventson = self.s_y.drawon = False
+        try:
+            self.s_x.set_val(x)
+            self.s_y.set_val(y)
+        finally:
+            self.s_x.eventson, self.s_x.drawon = events_x, draws_x
+            self.s_y.eventson, self.s_y.drawon = events_y, draws_y
+            self._guard = False
         self._redraw()
 
     def _on_trace_toggle(self, _):
@@ -353,8 +399,12 @@ def main():
                         help="distal link length (L2)")
     args = parser.parse_args()
 
-    Simulator(mode=args.mode, d=args.distance, l1=args.proximal, l2=args.distal)
+    # Keep a reference to the Simulator alive for the lifetime of the window.
+    # matplotlib widgets stop responding if the object owning them is garbage
+    # collected, and plt.show() only keeps the *figure* alive, not this instance.
+    sim = Simulator(mode=args.mode, d=args.distance, l1=args.proximal, l2=args.distal)
     plt.show()
+    return sim
 
 
 if __name__ == "__main__":
