@@ -240,12 +240,14 @@ class Simulator:
         self.b_work.on_clicked(self._on_workspace)
 
         # stroke playback controls
-        self.b_reload = Button(self.fig.add_axes([0.72, 0.30, 0.11, 0.05]), "Reload")
-        self.b_play   = Button(self.fig.add_axes([0.84, 0.30, 0.11, 0.05]), "Play")
+        self.b_reload = Button(self.fig.add_axes([0.72, 0.30, 0.075, 0.05]), "Reload")
+        self.b_fit    = Button(self.fig.add_axes([0.799, 0.30, 0.065, 0.05]), "Fit")
+        self.b_play   = Button(self.fig.add_axes([0.868, 0.30, 0.098, 0.05]), "Play")
         self.s_plot_w = self._slider([0.72, 0.23, 0.23, 0.03], "Plot W", 0.5, 30,  8.0)
-        self.s_plot_y = self._slider([0.72, 0.17, 0.23, 0.03], "Plot Y", -5,  40, 10.0)
+        self.s_plot_y = self._slider([0.72, 0.17, 0.23, 0.03], "Plot Y", -5,  40,  7.0)
         self.s_speed  = self._slider([0.72, 0.10, 0.23, 0.03], "Speed",  1,   50,  3.0)
         self.b_reload.on_clicked(self._on_reload)
+        self.b_fit.on_clicked(self._on_fit)
         self.b_play.on_clicked(self._on_play_pause)
         self.s_plot_w.on_changed(self._on_plot_params)
         self.s_plot_y.on_changed(self._on_plot_params)
@@ -388,6 +390,7 @@ class Simulator:
             filepath=filepath,
             mtime=os.path.getmtime(filepath),
         )
+        self._fit_image_to_workspace()  # scale/centre before building robot coords
         self._rebuild_robot_paths()
         self._draw_stroke_overlay()
         self._play_path = 0
@@ -445,6 +448,46 @@ class Simulator:
             line, = self.ax.plot(xs, ys, "-", lw=lw, color=color, alpha=alpha, zorder=1)
             self.stroke_lines.append(line)
         self.fig.canvas.draw_idle()
+
+    def _fit_image_to_workspace(self):
+        """Scale and centre the loaded image so it fits inside the reachable workspace."""
+        if not self.session:
+            return
+        W, H = self.session.img_w, self.session.img_h
+        max_reach = self.bot.l1 + self.bot.l2
+
+        # Fit width first, then check if the proportional height still fits.
+        pw = self.bot.d * 0.85
+        ph = pw * (H / W)
+        if ph > max_reach * 0.80:
+            ph = max_reach * 0.80
+            pw = ph * (W / H)
+
+        # Place the image so its bottom sits just above the motor base.
+        yc = ph / 2.0 + max_reach * 0.3
+
+        for slider, val in ((self.s_plot_w, max(0.5, round(pw, 1))),
+                            (self.s_plot_y, round(yc, 1))):
+            ev, dr = slider.eventson, slider.drawon
+            slider.eventson = slider.drawon = False
+            try:
+                slider.set_val(val)
+            finally:
+                slider.eventson, slider.drawon = ev, dr
+
+    def _on_fit(self, _):
+        if not self.session:
+            return
+        self._fit_image_to_workspace()
+        self._rebuild_robot_paths()
+        self._draw_stroke_overlay()
+        self._play_path = 0
+        self._play_pt = 0
+        self._playing = False
+        self.b_play.label.set_text("Play")
+        self.trace_x.clear()
+        self.trace_y.clear()
+        self.trace_line.set_data([], [])
 
     def _on_reload(self, _):
         if self.session:
