@@ -35,7 +35,7 @@
   }
   .wrap { width: 100%; max-width: 600px; }
 
-  /* Header */
+  /* ── Header ── */
   .head { text-align: center; margin-bottom: 30px; }
   .badge {
     width: 60px; height: 60px; border-radius: 16px;
@@ -47,7 +47,7 @@
   h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
   .sub { color: var(--ink-soft); margin: 8px 0 0; font-size: 15px; }
 
-  /* Entry cards */
+  /* ── Entry cards ── */
   .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 440px) { .cards { grid-template-columns: 1fr; } }
   .card {
@@ -63,13 +63,94 @@
   .card .badge { margin-bottom: 12px; }
   .card .title { font-weight: 650; font-size: 16px; }
   .card .note { color: var(--ink-soft); font-size: 13px; }
-
   input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
-  /* Preview state */
+  /* ── Settings panel ── */
+  .settings-panel {
+    margin-top: 16px;
+    background: var(--card); border: 1px solid var(--dash); border-radius: 18px;
+    overflow: hidden;
+  }
+  .settings-panel summary {
+    list-style: none;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; cursor: pointer; font-weight: 600; font-size: 15px;
+    user-select: none; -webkit-user-select: none;
+  }
+  .settings-panel summary::-webkit-details-marker { display: none; }
+  .settings-panel summary .chevron {
+    width: 18px; height: 18px; color: var(--ink-soft);
+    transition: transform .2s ease;
+  }
+  .settings-panel[open] summary .chevron { transform: rotate(180deg); }
+  .settings-panel summary .sum-left { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); }
+  .settings-panel summary .sum-left svg { width: 16px; height: 16px; }
+
+  .settings-body { padding: 4px 18px 18px; display: flex; flex-direction: column; gap: 14px; }
+  .settings-divider { height: 1px; background: var(--dash); margin: 2px 0; }
+
+  /* row layouts */
+  .set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .set-label { font-size: 14px; font-weight: 600; }
+  .set-note  { font-size: 12px; color: var(--ink-soft); margin-top: 1px; }
+  .set-left  { flex: 1; min-width: 0; }
+
+  /* segmented control */
+  .seg { display: flex; border: 1.5px solid var(--dash); border-radius: 10px; overflow: hidden; flex-shrink: 0; }
+  .seg-btn {
+    flex: 1; padding: 7px 14px; background: none; border: none;
+    font: 600 13px/1 inherit; color: var(--ink-soft); cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .seg-btn + .seg-btn { border-left: 1.5px solid var(--dash); }
+  .seg-btn.active { background: var(--accent); color: #fff; }
+
+  /* toggle switch */
+  .sw { position: relative; display: inline-block; width: 44px; height: 26px; flex-shrink: 0; }
+  .sw input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .sw-track {
+    position: absolute; inset: 0; background: var(--dash); border-radius: 13px;
+    cursor: pointer; transition: background .2s;
+  }
+  .sw-track::before {
+    content: ''; position: absolute; width: 20px; height: 20px;
+    left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s;
+  }
+  .sw input:checked ~ .sw-track { background: var(--accent); }
+  .sw input:checked ~ .sw-track::before { transform: translateX(18px); }
+
+  /* range slider */
+  .range-wrap { display: flex; align-items: center; gap: 10px; }
+  .range-wrap input[type=range] {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    height: 4px; border-radius: 2px; background: var(--dash); outline: none; cursor: pointer;
+  }
+  .range-wrap input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 22px; height: 22px;
+    border-radius: 50%; background: var(--accent); cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,.2);
+  }
+  .range-wrap input[type=range]::-moz-range-thumb {
+    width: 22px; height: 22px; border: none; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+  }
+  .range-val {
+    font-size: 13px; color: var(--ink-soft); font-variant-numeric: tabular-nums;
+    min-width: 36px; text-align: right; flex-shrink: 0;
+  }
+
+  /* shade sub-options */
+  .sub-opts {
+    background: var(--bg); border-radius: 12px; padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .sub-opts.hidden { display: none; }
+
+  /* ── Preview state ── */
   .review { display: none; }
   .review.show { display: block; }
   .cards.hide { display: none; }
+  .settings-panel.hide { display: none; }
   .stage {
     background: var(--card); border: 1px solid var(--dash); border-radius: 18px;
     aspect-ratio: 4 / 3; display: grid; place-items: center; overflow: hidden;
@@ -142,9 +223,117 @@
     </button>
   </div>
 
-  <!-- capture="environment" opens the rear camera; the plain input lets them pick from gallery/files -->
   <input type="file" id="cameraInput" accept="image/*" capture="environment">
-  <input type="file" id="fileInput" accept="image/*">
+  <input type="file" id="fileInput"   accept="image/*">
+
+  <!-- Processing settings -->
+  <details class="settings-panel" id="settingsPanel">
+    <summary>
+      <span class="sum-left">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14M12 2v2M12 20v2M2 12h2M20 12h2"/>
+        </svg>
+        Processing settings
+      </span>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+    </summary>
+
+    <div class="settings-body">
+
+      <!-- Style mode -->
+      <div class="set-row">
+        <div class="set-left">
+          <div class="set-label">Style</div>
+          <div class="set-note">Edges = sketch&thinsp;·&thinsp;Threshold = stencil</div>
+        </div>
+        <div class="seg" role="group" aria-label="Style">
+          <button class="seg-btn active" id="modeEdges"     type="button">Edges</button>
+          <button class="seg-btn"        id="modeThreshold" type="button">Threshold</button>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Fine texture -->
+      <div class="set-row">
+        <div class="set-left">
+          <div class="set-label">Fine texture</div>
+          <div class="set-note">Extra detail pass — hair, fabric, wrinkles</div>
+        </div>
+        <label class="sw">
+          <input type="checkbox" id="multiscale">
+          <span class="sw-track"></span>
+        </label>
+      </div>
+
+      <!-- Shading -->
+      <div class="set-row">
+        <div class="set-left">
+          <div class="set-label">Shading</div>
+          <div class="set-note">Hatching to convey depth and shadow</div>
+        </div>
+        <label class="sw">
+          <input type="checkbox" id="shade">
+          <span class="sw-track"></span>
+        </label>
+      </div>
+
+      <!-- Shade sub-options (shown only when shading is on) -->
+      <div class="sub-opts hidden" id="shadeOpts">
+
+        <div class="set-row">
+          <div class="set-left">
+            <div class="set-label">Layers</div>
+            <div class="set-note">Hatch = one angle&thinsp;·&thinsp;Crosshatch = two angles</div>
+          </div>
+          <div class="seg" role="group" aria-label="Shade layers">
+            <button class="seg-btn active" id="shade1" type="button">Hatch</button>
+            <button class="seg-btn"        id="shade2" type="button">Crosshatch</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="set-row" style="margin-bottom:6px">
+            <div class="set-label">Density</div>
+            <span class="range-val" id="spacingVal">6 px</span>
+          </div>
+          <div class="range-wrap">
+            <input type="range" id="shadeSpacing" min="3" max="16" step="1" value="6">
+          </div>
+          <div class="set-note" style="margin-top:4px">Smaller spacing = more lines = darker</div>
+        </div>
+
+        <div>
+          <div class="set-row" style="margin-bottom:6px">
+            <div class="set-label">Darkness threshold</div>
+            <span class="range-val" id="darkVal">180</span>
+          </div>
+          <div class="range-wrap">
+            <input type="range" id="shadeDark" min="80" max="230" step="5" value="180">
+          </div>
+          <div class="set-note" style="margin-top:4px">Lower = shade only very dark areas</div>
+        </div>
+
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Detail level (simplify) -->
+      <div>
+        <div class="set-row" style="margin-bottom:6px">
+          <div class="set-label">Detail level</div>
+          <span class="range-val" id="simplifyVal">medium</span>
+        </div>
+        <div class="range-wrap">
+          <input type="range" id="simplify" min="1" max="5" step="1" value="3">
+        </div>
+        <div class="set-note" style="margin-top:4px">Higher = more strokes, longer to plot</div>
+      </div>
+
+    </div>
+  </details>
 
   <!-- Review + send -->
   <div class="review" id="review">
@@ -159,33 +348,118 @@
 </div>
 
 <script>
-  const cards       = document.getElementById('cards');
-  const review      = document.getElementById('review');
-  const takeBtn     = document.getElementById('takeBtn');
-  const chooseBtn   = document.getElementById('chooseBtn');
-  const cameraInput = document.getElementById('cameraInput');
-  const fileInput   = document.getElementById('fileInput');
-  const preview     = document.getElementById('preview');
-  const meta        = document.getElementById('meta');
-  const sendBtn     = document.getElementById('sendBtn');
-  const resetBtn    = document.getElementById('resetBtn');
-  const bar         = document.getElementById('bar');
-  const barFill     = document.getElementById('barFill');
-  const statusEl    = document.getElementById('status');
+  const cards        = document.getElementById('cards');
+  const settingsPanel= document.getElementById('settingsPanel');
+  const review       = document.getElementById('review');
+  const takeBtn      = document.getElementById('takeBtn');
+  const chooseBtn    = document.getElementById('chooseBtn');
+  const cameraInput  = document.getElementById('cameraInput');
+  const fileInput    = document.getElementById('fileInput');
+  const previewImg   = document.getElementById('preview');
+  const meta         = document.getElementById('meta');
+  const sendBtn      = document.getElementById('sendBtn');
+  const resetBtn     = document.getElementById('resetBtn');
+  const bar          = document.getElementById('bar');
+  const barFill      = document.getElementById('barFill');
+  const statusEl     = document.getElementById('status');
 
+  // ── settings state ──────────────────────────────────────────────────────────
+  const DEFAULTS = { mode:'edges', multiscale:false, shade:false,
+                     shadeLayers:1, shadeSpacing:6, shadeDark:180, simplify:3 };
+
+  // simplify slider maps 1-5 steps to actual epsilon values
+  const simplifyMap = { 1:0.5, 2:1.0, 3:1.4, 4:2.2, 5:3.5 };
+  const simplifyLabel = { 1:'highest', 2:'high', 3:'medium', 4:'low', 5:'lowest' };
+
+  let cfg = Object.assign({}, DEFAULTS);
+
+  function loadCfg() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('plotterCfg') || '{}');
+      Object.assign(cfg, saved);
+    } catch(_) {}
+  }
+
+  function saveCfg() {
+    try { localStorage.setItem('plotterCfg', JSON.stringify(cfg)); } catch(_) {}
+  }
+
+  function applyCfgToUI() {
+    // mode
+    document.getElementById('modeEdges').classList.toggle('active', cfg.mode === 'edges');
+    document.getElementById('modeThreshold').classList.toggle('active', cfg.mode === 'threshold');
+    // toggles
+    document.getElementById('multiscale').checked = cfg.multiscale;
+    document.getElementById('shade').checked = cfg.shade;
+    // shade sub-options
+    document.getElementById('shadeOpts').classList.toggle('hidden', !cfg.shade);
+    document.getElementById('shade1').classList.toggle('active', cfg.shadeLayers === 1);
+    document.getElementById('shade2').classList.toggle('active', cfg.shadeLayers === 2);
+    document.getElementById('shadeSpacing').value = cfg.shadeSpacing;
+    document.getElementById('shadeDark').value     = cfg.shadeDark;
+    document.getElementById('spacingVal').textContent = cfg.shadeSpacing + ' px';
+    document.getElementById('darkVal').textContent    = cfg.shadeDark;
+    // simplify
+    document.getElementById('simplify').value = cfg.simplify;
+    document.getElementById('simplifyVal').textContent = simplifyLabel[cfg.simplify];
+  }
+
+  // ── settings event wiring ────────────────────────────────────────────────────
+  document.getElementById('modeEdges').addEventListener('click', () => {
+    cfg.mode = 'edges'; saveCfg(); applyCfgToUI();
+  });
+  document.getElementById('modeThreshold').addEventListener('click', () => {
+    cfg.mode = 'threshold'; saveCfg(); applyCfgToUI();
+  });
+
+  document.getElementById('multiscale').addEventListener('change', e => {
+    cfg.multiscale = e.target.checked; saveCfg();
+  });
+
+  document.getElementById('shade').addEventListener('change', e => {
+    cfg.shade = e.target.checked; saveCfg(); applyCfgToUI();
+  });
+
+  document.getElementById('shade1').addEventListener('click', () => {
+    cfg.shadeLayers = 1; saveCfg(); applyCfgToUI();
+  });
+  document.getElementById('shade2').addEventListener('click', () => {
+    cfg.shadeLayers = 2; saveCfg(); applyCfgToUI();
+  });
+
+  document.getElementById('shadeSpacing').addEventListener('input', e => {
+    cfg.shadeSpacing = +e.target.value;
+    document.getElementById('spacingVal').textContent = cfg.shadeSpacing + ' px';
+    saveCfg();
+  });
+
+  document.getElementById('shadeDark').addEventListener('input', e => {
+    cfg.shadeDark = +e.target.value;
+    document.getElementById('darkVal').textContent = cfg.shadeDark;
+    saveCfg();
+  });
+
+  document.getElementById('simplify').addEventListener('input', e => {
+    cfg.simplify = +e.target.value;
+    document.getElementById('simplifyVal').textContent = simplifyLabel[cfg.simplify];
+    saveCfg();
+  });
+
+  // ── photo selection ──────────────────────────────────────────────────────────
   let chosen = null;
 
-  takeBtn.addEventListener('click', () => cameraInput.click());
+  takeBtn.addEventListener('click',   () => cameraInput.click());
   chooseBtn.addEventListener('click', () => fileInput.click());
   cameraInput.addEventListener('change', () => onPicked(cameraInput.files[0]));
-  fileInput.addEventListener('change', () => onPicked(fileInput.files[0]));
+  fileInput.addEventListener('change',   () => onPicked(fileInput.files[0]));
   resetBtn.addEventListener('click', reset);
 
   function onPicked(file) {
     if (!file) return;
     chosen = file;
-    preview.src = URL.createObjectURL(file);
+    previewImg.src = URL.createObjectURL(file);
     cards.classList.add('hide');
+    settingsPanel.classList.add('hide');
     review.classList.add('show');
     sendBtn.disabled = false;
     setStatus('', '');
@@ -199,9 +473,11 @@
     cameraInput.value = ''; fileInput.value = '';
     review.classList.remove('show');
     cards.classList.remove('hide');
+    settingsPanel.classList.remove('hide');
     setStatus('', '');
   }
 
+  // ── upload ───────────────────────────────────────────────────────────────────
   sendBtn.addEventListener('click', () => {
     if (!chosen) return;
     sendBtn.disabled = true; resetBtn.disabled = true;
@@ -211,15 +487,24 @@
     const form = new FormData();
     form.append('photo', chosen, chosen.name || 'photo.jpg');
 
+    // processing parameters from current UI state
+    form.append('mode',          cfg.mode);
+    form.append('multiscale',    cfg.multiscale    ? '1' : '0');
+    form.append('shade',         cfg.shade         ? '1' : '0');
+    form.append('shade_layers',  cfg.shadeLayers);
+    form.append('shade_spacing', cfg.shadeSpacing);
+    form.append('shade_dark',    cfg.shadeDark);
+    form.append('simplify',      simplifyMap[cfg.simplify]);
+
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/upload');
-    xhr.upload.addEventListener('progress', (e) => {
+    xhr.upload.addEventListener('progress', e => {
       if (e.lengthComputable) barFill.style.width = Math.round((e.loaded / e.total) * 100) + '%';
     });
     xhr.addEventListener('load', () => {
       resetBtn.disabled = false;
       let res = {};
-      try { res = JSON.parse(xhr.responseText); } catch (_) {}
+      try { res = JSON.parse(xhr.responseText); } catch(_) {}
       if (xhr.status >= 200 && xhr.status < 300 && res.ok) {
         setStatus('Sent. The plotter has your photo.', 'ok');
         meta.textContent = `${res.filename} · ${formatBytes(res.size_bytes)}`;
@@ -231,7 +516,7 @@
     });
     xhr.addEventListener('error', () => {
       resetBtn.disabled = false; sendBtn.disabled = false; barFill.style.width = '0%';
-      setStatus('Could not reach the plotter. Check you’re on the same Wi-Fi.', 'err');
+      setStatus("Could not reach the plotter. Check you're on the same Wi-Fi.", 'err');
     });
     xhr.send(form);
   });
@@ -246,6 +531,10 @@
     while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
     return b.toFixed(i ? 1 : 0) + ' ' + u[i];
   }
+
+  // ── init ─────────────────────────────────────────────────────────────────────
+  loadCfg();
+  applyCfgToUI();
 </script>
 </body>
 </html>
