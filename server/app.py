@@ -11,10 +11,13 @@ Run on the Pi:
     # With plotter forwarding:
     PLOTTER_IP=192.168.1.50 python app.py
     PLOTTER_IP=192.168.1.50 PLOTTER_PORT=9000 python app.py
+
 Then open http://<pi-lan-ip>:5000 on your phone (same Wi-Fi network).
 """
 
+import argparse
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -36,12 +39,30 @@ os.makedirs(OUTPUTS_FOLDER, exist_ok=True)
 PLOTTER_IP = os.environ.get("PLOTTER_IP")
 PLOTTER_PORT = int(os.environ.get("PLOTTER_PORT", "9000"))
 
+# Overridden to True by --sim at startup; False when running on real hardware.
+SIM_MODE = False
+
+
 # Phone photos are big; allow generous headroom. HEIC/large JPEGs included.
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+
+
+def _params_from_request() -> Params:
+    """Build Params from form fields sent with the upload, falling back to defaults."""
+    f = request.form
+    return Params(
+        mode          = f.get("mode", "edges"),
+        simplify      = float(f.get("simplify", 1.4)),
+        multiscale    = f.get("multiscale") == "1",
+        shade         = f.get("shade") == "1",
+        shade_layers  = int(f.get("shade_layers", 1)),
+        shade_spacing = float(f.get("shade_spacing", 6.0)),
+        shade_dark    = int(f.get("shade_dark", 180)),
+    )
 
 
 def is_allowed(filename: str) -> bool:
@@ -89,15 +110,17 @@ def upload():
     json_path    = os.path.join(OUTPUTS_FOLDER, f"{base}.json")
 
     try:
-        paths, (w, h) = photo_to_paths(path, Params())
-        write_svg(paths, w, h, svg_path)
-        write_preview(paths, w, h, preview_path)
-        write_json(paths, w, h, json_path)
-        stats = path_stats(paths)
+        paths, weights, (w, h) = photo_to_paths(path, _params_from_request())
+        write_svg(paths, weights, w, h, svg_path)
+        write_preview(paths, weights, w, h, preview_path)
+        write_json(paths, weights, w, h, json_path)
+        if SIM_MODE:
+            shutil.copy2(json_path, os.path.join(OUTPUTS_FOLDER, "latest.json"))
+        stats = path_stats(paths, weights)
 
         forwarded = None
         if PLOTTER_IP:
-            forwarded = send_to_device(paths, w, h, PLOTTER_IP, PLOTTER_PORT)
+            forwarded = send_to_device(paths, weights, w, h, PLOTTER_IP, PLOTTER_PORT)
 
         processing = dict(
             svg=f"/outputs/{base}.svg",
@@ -135,4 +158,10 @@ def too_large(_e):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    parser = argparse.ArgumentParser(description="Plotter upload server")
+    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--sim", action="store_true",
+                        help="write outputs/latest.json after each upload for the simulator")
+    args = parser.parse_args()
+    SIM_MODE = args.sim
+    app.run(host="0.0.0.0", port=args.port, debug=False)
