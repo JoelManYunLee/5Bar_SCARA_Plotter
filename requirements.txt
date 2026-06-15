@@ -1,0 +1,9 @@
+# simulator (sim/simulator.py)
+matplotlib==3.11.0
+numpy==2.4.6
+
+# server (server/app.py, server/process.py)
+flask
+Pillow==12.2.0
+opencv-python
+pillow-heif
