@@ -11,6 +11,7 @@ Run on the Pi:
     # With plotter forwarding:
     PLOTTER_IP=192.168.1.50 python app.py
     PLOTTER_IP=192.168.1.50 PLOTTER_PORT=9000 python app.py
+
 Then open http://<pi-lan-ip>:5000 on your phone (same Wi-Fi network).
 """
 
@@ -35,6 +36,7 @@ os.makedirs(OUTPUTS_FOLDER, exist_ok=True)
 # Set PLOTTER_IP env var to enable forwarding: PLOTTER_IP=192.168.1.50 python app.py
 PLOTTER_IP = os.environ.get("PLOTTER_IP")
 PLOTTER_PORT = int(os.environ.get("PLOTTER_PORT", "9000"))
+
 
 # Phone photos are big; allow generous headroom. HEIC/large JPEGs included.
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB

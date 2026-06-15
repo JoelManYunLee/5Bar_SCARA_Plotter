@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -128,6 +129,7 @@ class Simulator:
         self._guard = False             # prevents slider call-back recursion
         self.tracing = False
         self._dragging = False          # True while the pen is being dragged in IK mode
+        self._last_draw_time = 0.0
         self.trace_x: list[float] = []
         self.trace_y: list[float] = []
 
@@ -264,9 +266,15 @@ class Simulator:
             self._dragging = True
             self._move_pen(event.xdata, event.ydata)
 
+    _DRAG_INTERVAL = 1 / 60  # cap redraws at ~30 fps during drag
+
     def _on_motion(self, event):
         if not self._dragging or event.inaxes is not self.ax or event.xdata is None:
             return
+        now = time.monotonic()
+        if now - self._last_draw_time < self._DRAG_INTERVAL:
+            return
+        self._last_draw_time = now
         self._move_pen(event.xdata, event.ydata)
 
     def _on_release(self, _):
@@ -275,7 +283,11 @@ class Simulator:
     def _move_pen(self, x, y):
         """Drive the pen to (x, y) if reachable, keeping the IK sliders in sync."""
         if self.bot.inverse((x, y)) is None:
-            return                      # ignore unreachable targets while dragging
+            self.pen.set_visible(False)
+            self.status.set_text("  pose unreachable — outside workspace")
+            self.fig.canvas.draw_idle()
+            return
+        self.pen.set_visible(True)
         self.ee = (x, y)
         self._guard = True              # the slider writes below must not re-enter
         events_x, draws_x = self.s_x.eventson, self.s_x.drawon
