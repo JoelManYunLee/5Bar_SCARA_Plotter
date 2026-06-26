@@ -28,15 +28,21 @@ lgpio is software-timed from Python, so step pulses have more jitter than pigpio
 DMA engine — fine for a low-speed bench test (≤ ~1 kHz), but for production motion
 move to lgpio waves (tx_wave) or back to an MCU.
 
-Wiring (BCM pin numbers; TB6600 uses differential inputs)
-  Connect each driver:  PUL+ → RPi GPIO,  PUL− → RPi GND
-                        DIR+ → RPi GPIO,  DIR− → RPi GND
-                        ENA+ → RPi GPIO,  ENA− → RPi GND
-  Then update A_STEP / A_DIR / A_ENA (and B_…) below to match your wiring.
+Wiring — COMMON-ANODE (set WIRING = "common_anode" below; this is the default)
+  Tie all "+" pins to the Pi's 3.3V rail, sink the "−" pins with the GPIOs:
+        PUL+ ┐                 PUL− → RPi GPIO  (A_STEP / B_STEP)
+        DIR+ ├─ RPi 3.3V       DIR− → RPi GPIO  (A_DIR  / B_DIR)
+        ENA+ ┘  (pin 1 or 17)  ENA− → RPi GPIO  (A_ENA  / B_ENA)
+  Use 3.3V — NOT 5V — for the anode rail: a 5V rail leaves ~1.7V across the
+  opto when a 3.3V GPIO goes HIGH, which may not switch it fully off.
+
+  For COMMON-CATHODE instead (GPIOs drive "+", all "−" to GND), set
+  WIRING = "common_cathode" and the logic inverts automatically.
 
     BCM 17  = physical pin 11    BCM 23  = physical pin 16
     BCM 27  = physical pin 13    BCM 24  = physical pin 18
     BCM 22  = physical pin 15    BCM 25  = physical pin 22
+    3.3V    = physical pin 1 or 17
 
 IMPORTANT: before running, manually rotate both proximal links to the home
   angle (90° above horizontal — links pointing straight up).  The step
@@ -94,7 +100,18 @@ B_STEP = 23
 B_DIR  = 24
 B_ENA  = 25
 
-ENA_ACTIVE_LOW = True   # TB6600 ENA: LOW = driver enabled, HIGH = driver off
+# TB6600 opto-input wiring mode:
+#   "common_cathode" — all "−" pins to GND; GPIOs drive the "+" pins.
+#                      An opto turns ON when its GPIO is HIGH (active-HIGH).
+#   "common_anode"   — all "+" pins to the 3.3V rail; GPIOs sink the "−" pins.
+#                      An opto turns ON when its GPIO is LOW (active-LOW).
+# For a 3.3V Pi in common-anode, tie the "+" rail to 3.3V (header pin 1 or 17),
+# NOT 5V — a 5V anode leaves ~1.7V across the opto at GPIO-HIGH and may not
+# switch fully off, causing ghost steps.
+WIRING = "common_anode"
+
+_ON  = 0 if WIRING == "common_anode" else 1   # GPIO level that turns an opto ON
+_OFF = 1 - _ON                                # GPIO level that turns an opto OFF
 
 # ── Step timing ───────────────────────────────────────────────────────────────
 CRUISE_SPEED = 600    # steps/s at full speed; stay ≤ 1000 for soft-timed Python
@@ -168,20 +185,24 @@ _pos_b = 0
 
 
 def _setup_gpio():
+    # Claim every line in the OFF (idle) state so no opto conducts at startup.
     for pin in (A_STEP, A_DIR, A_ENA, B_STEP, B_DIR, B_ENA):
-        lgpio.gpio_claim_output(_h, pin, 0)
+        lgpio.gpio_claim_output(_h, pin, _OFF)
 
 
 def _enable(on: bool):
-    level = (0 if on else 1) if ENA_ACTIVE_LOW else (1 if on else 0)
+    # TB6600 ENA opto ON = driver outputs DISABLED (coils released).  So to
+    # *enable* the motor we leave the ENA opto OFF, and vice-versa.
+    level = _OFF if on else _ON
     lgpio.gpio_write(_h, A_ENA, level)
     lgpio.gpio_write(_h, B_ENA, level)
 
 
 def _pulse(pin):
-    lgpio.gpio_write(_h, pin, 1)
+    # One step = drive the opto ON for PULSE_US, then back to OFF (idle).
+    lgpio.gpio_write(_h, pin, _ON)
     time.sleep(PULSE_US * 1e-6)
-    lgpio.gpio_write(_h, pin, 0)
+    lgpio.gpio_write(_h, pin, _OFF)
 
 
 def _step_speed(i, total):
@@ -212,8 +233,10 @@ def _move_to(target_a, target_b):
     major   = max(steps_a, steps_b)
 
     # Set direction — TB6600 requires DIR stable ≥ 5 µs before first pulse.
-    lgpio.gpio_write(_h, A_DIR, 0 if sign_a * DIR_A > 0 else 1)
-    lgpio.gpio_write(_h, B_DIR, 0 if sign_b * DIR_B > 0 else 1)
+    # Positive direction drives the DIR opto ON; flip DIR_A / DIR_B if a motor
+    # turns the wrong way.
+    lgpio.gpio_write(_h, A_DIR, _ON if sign_a * DIR_A > 0 else _OFF)
+    lgpio.gpio_write(_h, B_DIR, _ON if sign_b * DIR_B > 0 else _OFF)
     time.sleep(20e-6)
 
     err_a = major // 2
