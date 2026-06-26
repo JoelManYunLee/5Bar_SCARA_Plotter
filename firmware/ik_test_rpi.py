@@ -67,9 +67,9 @@ except ImportError:
 
 
 # ── Machine geometry (must match ik_test.ino and sim/simulator.py) ────────────
-LINK_BASE = 8.0     # distance between the two motor shafts (cm)
-LINK_PROX = 6.0     # proximal link length, motor → elbow  (cm)
-LINK_DIST = 9.0     # distal link length,   elbow → pen    (cm)
+LINK_BASE = 10.0     # distance between the two motor shafts (cm)
+LINK_PROX = 13.0     # proximal link length, motor → elbow  (cm)
+LINK_DIST = 15.0     # distal link length,   elbow → pen    (cm)
 
 # ── Motor / drivetrain ─────────────────────────────────────────────────────────
 MOTOR_FULL_STEPS = 200        # NEMA-17: 1.8° / step → 200 steps/rev
