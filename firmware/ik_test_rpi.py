@@ -365,10 +365,6 @@ def main():
     _enable(True)
 
     threading.Thread(target=_input_thread, daemon=True).start()
-
-    tx, ty = _home_xy()
-    print(f"[ik_test] homing → ({tx:.2f}, {ty:.2f})")
-    _command(tx, ty)
     print("[ik_test] ready — D-pad to move  |  Start = home  |  Select = quit")
 
     tick      = 1.0 / LOOP_HZ
