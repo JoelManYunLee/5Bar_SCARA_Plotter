@@ -79,11 +79,11 @@ LINK_DIST = 15.0     # distal link length,   elbow → pen    (cm)
 
 # ── Motor / drivetrain ─────────────────────────────────────────────────────────
 MOTOR_FULL_STEPS = 200        # NEMA-17: 1.8° / step → 200 steps/rev
-MICROSTEPS       = 16         # TB6600 DIP switch setting — must match hardware
+MICROSTEPS       = 4          # TB6600 DIP switch setting — must match hardware
 GEAR_RATIO       = 32.0       # harmonic-drive output : motor shaft
 
-STEPS_PER_REV = MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO  # 102 400
-STEPS_PER_RAD = STEPS_PER_REV / (2.0 * math.pi)             # ≈ 16 297
+STEPS_PER_REV = MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO  # 200·8·32 = 51 200
+STEPS_PER_RAD = STEPS_PER_REV / (2.0 * math.pi)             # ≈ 8 149
 
 THETA_A_HOME_DEG = 90.0   # left  motor home angle (CCW from +X)
 THETA_B_HOME_DEG = 90.0   # right motor home angle
@@ -114,10 +114,15 @@ _ON  = 0 if WIRING == "common_anode" else 1   # GPIO level that turns an opto ON
 _OFF = 1 - _ON                                # GPIO level that turns an opto OFF
 
 # ── Step timing ───────────────────────────────────────────────────────────────
-CRUISE_SPEED = 600    # steps/s at full speed; stay ≤ 1000 for soft-timed Python
-MIN_SPEED    = 80     # steps/s at the start/end of each move (ramp endpoints)
-ACCEL_STEPS  = 120    # steps used to ramp up to cruise (same count for ramp down)
-PULSE_US     = 10     # PUL+ high time (µs); TB6600 spec is ≥ 2.5 µs
+# The hybrid sleep+busy-wait timer (see _sleep_until) holds accurate periods well
+# past the old ~1 kHz soft-sleep ceiling.  If you push CRUISE_SPEED higher and the
+# motors stall or lose steps, back it off — a stalled driver feels *slower* than a
+# lower speed that never skips.  MIN_SPEED matters as much as CRUISE_SPEED here:
+# short d-pad moves rarely reach cruise, so a brisk ramp floor keeps them snappy.
+CRUISE_SPEED = 1600   # steps/s at full speed
+MIN_SPEED    = 500    # steps/s at the start/end of each move (ramp endpoints)
+ACCEL_STEPS  = 50     # steps used to ramp up to cruise (same count for ramp down)
+PULSE_US     = 5      # PUL+ high time (µs); TB6600 spec is ≥ 2.5 µs
 
 # ── End-effector control ──────────────────────────────────────────────────────
 KEY_STEP    = 0.2    # robot units per d-pad press
@@ -198,10 +203,25 @@ def _enable(on: bool):
     lgpio.gpio_write(_h, B_ENA, level)
 
 
+def _sleep_until(target):
+    """Block until perf_counter() reaches `target` (seconds).
+
+    Plain time.sleep() has ~50–100 µs of scheduler-wakeup jitter on Linux, which
+    both blurs step spacing and caps the achievable rate.  Here we coarse-sleep the
+    bulk of the interval (cheap, yields the CPU) and busy-wait only the final ~150 µs
+    for accuracy — smooth timing without pegging a core at low step rates.
+    """
+    remaining = target - time.perf_counter()
+    if remaining > 250e-6:
+        time.sleep(remaining - 200e-6)
+    while time.perf_counter() < target:
+        pass
+
+
 def _pulse(pin):
     # One step = drive the opto ON for PULSE_US, then back to OFF (idle).
     lgpio.gpio_write(_h, pin, _ON)
-    time.sleep(PULSE_US * 1e-6)
+    _sleep_until(time.perf_counter() + PULSE_US * 1e-6)
     lgpio.gpio_write(_h, pin, _OFF)
 
 
@@ -242,9 +262,12 @@ def _move_to(target_a, target_b):
     err_a = major // 2
     err_b = major // 2
 
+    # Accumulate step deadlines against a single clock so timing can't drift:
+    # any overrun on one step is absorbed by the next, not compounded.
+    t_next = time.perf_counter()
+
     for i in range(major):
-        t0     = time.monotonic()
-        period = 1.0 / _step_speed(i, major)
+        t_next += 1.0 / _step_speed(i, major)
 
         err_a += steps_a
         if err_a >= major:
@@ -258,9 +281,7 @@ def _move_to(target_a, target_b):
             _pulse(B_STEP)
             _pos_b += sign_b
 
-        wait = period - (time.monotonic() - t0)
-        if wait > 0:
-            time.sleep(wait)
+        _sleep_until(t_next)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
