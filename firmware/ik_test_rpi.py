@@ -44,9 +44,13 @@ Wiring — COMMON-ANODE (set WIRING = "common_anode" below; this is the default)
     BCM 22  = physical pin 15    BCM 25  = physical pin 22
     3.3V    = physical pin 1 or 17
 
-IMPORTANT: before running, manually rotate both proximal links to the home
-  angle (90° above horizontal — links pointing straight up).  The step
-  counter starts at zero and assumes that physical orientation.
+HOMING: on startup each motor drives slowly toward its own limit switch, backs
+  off, and re-approaches for a repeatable trigger point; the step counter is then
+  calibrated to THETA_*_SWITCH_DEG, so there is no need to hand-position the arms
+  first.  Wire each switch between its GPIO and GND — the internal pull-ups are
+  enabled, so a closed (triggered) switch reads LOW.
+    LIMIT_A  BCM 5  = physical pin 29
+    LIMIT_B  BCM 6  = physical pin 31
 
 Verify PS3 axis mapping if movement feels wrong:
   jstest /dev/input/js0
@@ -84,7 +88,6 @@ GEAR_RATIO       = 32.0       # harmonic-drive output : motor shaft
 
 STEPS_PER_REV = MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO  # 200·8·32 = 51 200
 STEPS_PER_RAD = STEPS_PER_REV / (2.0 * math.pi)             # ≈ 8 149
-
 THETA_A_HOME_DEG = 90.0   # left  motor home angle (CCW from +X)
 THETA_B_HOME_DEG = 90.0   # right motor home angle
 
@@ -99,6 +102,29 @@ A_ENA  = 22
 B_STEP = 23
 B_DIR  = 24
 B_ENA  = 25
+
+# ── Limit-switch homing ───────────────────────────────────────────────────────
+# One switch per proximal link.  Wire each between its GPIO and GND; the internal
+# pull-up is enabled below, so an untriggered input reads HIGH (1) and a closed
+# (triggered) switch reads LOW (0).
+LIMIT_A = 5    # motor-A proximal-link limit switch (BCM 5,  physical pin 29)
+LIMIT_B = 6    # motor-B proximal-link limit switch (BCM 6,  physical pin 31)
+LIMIT_ACTIVE = 0    # GPIO level read when a switch is triggered (0 = active-low)
+
+# Physical proximal-link angle (deg, CCW from +X) at the instant each switch
+# trips.  This is the known reference the step counter is calibrated to, so it
+# must match where you actually mount the switches.
+THETA_A_SWITCH_DEG = 170.0
+THETA_B_SWITCH_DEG = 170.0
+
+# Step-space direction (+1 / -1) that drives each link TOWARD its switch.
+# Flip if a motor seeks away from the switch during homing.
+HOMING_SEEK_A = +1
+HOMING_SEEK_B = +1 
+
+HOMING_SEEK_SPEED    = 400   # steps/s for the initial fast approach
+HOMING_SLOW_SPEED    = 100   # steps/s for the precise re-approach
+HOMING_BACKOFF_STEPS = 200   # steps to retreat between the fast and slow approach
 
 # TB6600 opto-input wiring mode:
 #   "common_cathode" — all "−" pins to GND; GPIOs drive the "+" pins.
@@ -190,9 +216,12 @@ _pos_b = 0
 
 
 def _setup_gpio():
-    # Claim every line in the OFF (idle) state so no opto conducts at startup.
+    # Claim every driver line in the OFF (idle) state so no opto conducts at startup.
     for pin in (A_STEP, A_DIR, A_ENA, B_STEP, B_DIR, B_ENA):
         lgpio.gpio_claim_output(_h, pin, _OFF)
+    # Limit-switch inputs with the internal pull-ups enabled (switch-to-ground).
+    for pin in (LIMIT_A, LIMIT_B):
+        lgpio.gpio_claim_input(_h, pin, lgpio.SET_PULL_UP)
 
 
 def _enable(on: bool):
@@ -285,6 +314,83 @@ def _move_to(target_a, target_b):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Limit-switch homing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fatal(msg):
+    """Abort cleanly: report, release the motors, free the GPIO, and exit."""
+    print(f"[home] ERROR: {msg}")
+    _enable(False)
+    lgpio.gpiochip_close(_h)
+    sys.exit(1)
+
+
+def _switch_pressed(pin):
+    return lgpio.gpio_read(_h, pin) == LIMIT_ACTIVE
+
+
+def _jog(step_pin, dir_pin, seek_sign, motor_dir, n_steps, period):
+    """Open-loop jog one motor n_steps in the step-space direction seek_sign."""
+    lgpio.gpio_write(_h, dir_pin, _ON if seek_sign * motor_dir > 0 else _OFF)
+    time.sleep(20e-6)
+    for _ in range(n_steps):
+        _pulse(step_pin)
+        _sleep_until(time.perf_counter() + period)
+
+
+def _home_axis(name, step_pin, dir_pin, switch_pin, seek_sign, motor_dir):
+    """
+    Reference one motor against its limit switch:
+      1. if already on the switch, back off so the approach is repeatable;
+      2. fast-seek toward the switch until it trips;
+      3. back off a little and re-approach slowly for a precise trigger edge.
+    seek_sign is the step-space direction (+1 / -1) that drives the link toward
+    the switch.  Faults out if the switch is never found within one revolution.
+    """
+    fast = 1.0 / HOMING_SEEK_SPEED
+    slow = 1.0 / HOMING_SLOW_SPEED
+    max_steps = int(STEPS_PER_REV)   # a full output revolution is the safety ceiling
+
+    # If we start already on the switch, retreat clear before seeking.
+    if _switch_pressed(switch_pin):
+        _jog(step_pin, dir_pin, -seek_sign, motor_dir, HOMING_BACKOFF_STEPS, slow)
+
+    # Fast approach toward the switch.
+    lgpio.gpio_write(_h, dir_pin, _ON if seek_sign * motor_dir > 0 else _OFF)
+    time.sleep(20e-6)
+    seen = 0
+    while not _switch_pressed(switch_pin):
+        _pulse(step_pin)
+        _sleep_until(time.perf_counter() + fast)
+        seen += 1
+        if seen > max_steps:
+            _fatal(f"motor {name}: limit switch never triggered — check the wiring, "
+                   f"LIMIT_ACTIVE, and HOMING_SEEK_{name}")
+
+    # Back off, then creep back onto the switch for a repeatable trigger edge.
+    _jog(step_pin, dir_pin, -seek_sign, motor_dir, HOMING_BACKOFF_STEPS, slow)
+    lgpio.gpio_write(_h, dir_pin, _ON if seek_sign * motor_dir > 0 else _OFF)
+    time.sleep(20e-6)
+    while not _switch_pressed(switch_pin):
+        _pulse(step_pin)
+        _sleep_until(time.perf_counter() + slow)
+    print(f"[home] motor {name} referenced")
+
+
+def _home_all():
+    """Home both motors against their limit switches, then calibrate the step
+    counters to the known switch angles."""
+    global _pos_a, _pos_b
+    print("[home] seeking limit switches …")
+    _home_axis('A', A_STEP, A_DIR, LIMIT_A, HOMING_SEEK_A, DIR_A)
+    _home_axis('B', B_STEP, B_DIR, LIMIT_B, HOMING_SEEK_B, DIR_B)
+    # The switch defines a known joint angle → seed the step counters from it.
+    _pos_a = _angle_to_steps(math.radians(THETA_A_SWITCH_DEG), THETA_A_HOME_DEG, DIR_A)
+    _pos_b = _angle_to_steps(math.radians(THETA_B_SWITCH_DEG), THETA_B_HOME_DEG, DIR_B)
+    print(f"[home] calibrated — A={THETA_A_SWITCH_DEG:.1f}°  B={THETA_B_SWITCH_DEG:.1f}°")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PS3 controller input (background thread)
 # ─────────────────────────────────────────────────────────────────────────────
 # Mapping for PS3 DualShock 3 via USB on Linux (hid-sony driver):
@@ -363,11 +469,12 @@ def _command(x, y):
 def main():
     _setup_gpio()
     _enable(True)
+    _home_all()
 
     threading.Thread(target=_input_thread, daemon=True).start()
 
     tx, ty = _home_xy()
-    print(f"[ik_test] homing → ({tx:.2f}, {ty:.2f})")
+    print(f"[ik_test] moving to work home → ({tx:.2f}, {ty:.2f})")
     _command(tx, ty)
     print("[ik_test] ready — D-pad to move  |  Start = home  |  Select = quit")
 

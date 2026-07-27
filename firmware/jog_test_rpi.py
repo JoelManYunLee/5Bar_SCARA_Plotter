@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
 """
-fk_test_rpi.py — Raspberry Pi 3B FORWARD-kinematics bench test for the 5-Bar SCARA.
+jog_test_rpi.py — Raspberry Pi 3B manual motor + servo bench test for the 5-Bar SCARA.
 
 Companion to ik_test_rpi.py.  Where the IK script asks you for an (x, y) pen
-target and solves backwards for the two motor angles, this script lets you drive
-each MOTOR ANGLE directly — the two shoulders are steered independently — and it
-computes the resulting pen (x, y) via forward kinematics for display.  Handy for
-checking joint limits, DIR signs, and the geometry without trusting the IK solver.
+target and solves backwards for the two motor angles, this script does no
+kinematics at all: it jogs each MOTOR independently so you can eyeball joint
+limits, DIR signs, and the mechanics directly.  It also drives the end-effector
+SERVO (the pen-lift) straight from the PS3 controller.
 
-Same wiring, same driver, same geometry as ik_test_rpi.py — see that file's header
-for the full wiring notes and one-time Pi setup.  Home the links straight up (90°)
+Same wiring, same drivers as ik_test_rpi.py — see that file's header for the full
+wiring notes and one-time Pi setup.  Home both proximal links straight up (90°)
 before running; the step counters start at zero and assume that orientation.
 
 Controls
-  Left stick  Y ... motor A angle: continuous rate while held (up = increase θ_a)
-  Right stick Y ... motor B angle: continuous rate while held (up = increase θ_b)
-  D-pad L / R ..... nudge motor A angle by KEY_STEP_DEG (one press = one nudge)
-  D-pad U / D ..... nudge motor B angle by KEY_STEP_DEG
-  Start ........... return both joints to the home angle
+  Left stick  Y ... motor A: continuous jog while held (up = increase θ_a)
+  Right stick Y ... motor B: continuous jog while held (up = increase θ_b)
+  D-pad L / R ..... nudge motor A by KEY_STEP_DEG (one press = one nudge)
+  D-pad U / D ..... nudge motor B by KEY_STEP_DEG
+  L1 / R1 ......... end-effector servo: pen up / pen down preset
+  Triangle / Cross  trim the servo by SERVO_NUDGE_US (live calibration)
+  Start ........... return both motors to the home angle
   Select .......... disable motors and quit
 
-Verify PS3 axis mapping if a stick feels wrong (right stick varies by driver):
-  jstest /dev/input/js0
-  (left stick: ABS_X / ABS_Y;  right stick: ABS_RX / ABS_RY  — or ABS_Z / ABS_RZ)
+Wire the pen-lift servo's signal to SERVO_PIN, power it from an external 5V
+supply, and tie the servo ground to the Pi ground (see the pin block below).
+
+Verify PS3 axis/button mapping if something feels wrong (varies by driver):
+  jstest /dev/input/js0      # or: evtest /dev/input/eventN
+  (left stick: ABS_X / ABS_Y;  right stick: ABS_RX / ABS_RY — or ABS_Z / ABS_RZ)
+  (L1/R1: BTN_TL / BTN_TR;  Triangle/Cross: BTN_NORTH / BTN_SOUTH)
 """
 
 import math
@@ -43,11 +49,6 @@ try:
 except ImportError:
     sys.exit("inputs not found — install with: pip3 install inputs")
 
-
-# ── Machine geometry (must match ik_test_rpi.py and sim/simulator.py) ──────────
-LINK_BASE = 10.0     # distance between the two motor shafts (cm)
-LINK_PROX = 13.0     # proximal link length, motor → elbow  (cm)
-LINK_DIST = 15.0     # distal link length,   elbow → pen    (cm)
 
 # ── Motor / drivetrain ─────────────────────────────────────────────────────────
 MOTOR_FULL_STEPS = 200        # NEMA-17: 1.8° / step → 200 steps/rev
@@ -77,6 +78,12 @@ B_STEP = 23
 B_DIR  = 24
 B_ENA  = 25
 
+# End-effector servo (pen lift).  Direct 3.3V PWM signal on this GPIO — NOT an
+# opto input, so it ignores the WIRING mode below.  Power the servo from an
+# external 5V supply and tie its ground to the Pi's ground; GPIO18 is a safe,
+# hardware-PWM-capable choice on the 40-pin header (physical pin 12).
+SERVO_PIN = 18
+
 WIRING = "common_anode"       # see ik_test_rpi.py header for the wiring modes
 
 _ON  = 0 if WIRING == "common_anode" else 1   # GPIO level that turns an opto ON
@@ -94,45 +101,21 @@ STICK_SPEED   = 25.0   # deg/s per joint when a stick is fully deflected
 DEADZONE      = 0.15   # ignore stick deflections smaller than this (0–1)
 LOOP_HZ       = 30     # main-loop polling rate (Hz)
 
+# ── End-effector servo (pen lift) ─────────────────────────────────────────────
+# Standard hobby servos accept a 1000–2000 µs pulse at 50 Hz (many take the wider
+# 500–2500 µs range).  Tune the two presets to your linkage: SERVO_UP_US should
+# lift the pen clear of the paper, SERVO_DOWN_US should press it down to draw.
+SERVO_MIN_US   = 500     # safety clamp — never command a pulse below this
+SERVO_MAX_US   = 2500    # safety clamp — never command a pulse above this
+SERVO_UP_US    = 1000    # pen raised (travel)
+SERVO_DOWN_US  = 2000    # pen lowered (drawing)
+SERVO_NUDGE_US = 25      # µs per Triangle/Cross press, for live calibration
+SERVO_FREQ_HZ  = 50      # servo refresh rate
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Forward kinematics — angles → pen (x, y)
+# Angle → step conversion
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _circle_intersections(x0, y0, r0, x1, y1, r1):
-    dx, dy = x1 - x0, y1 - y0
-    d = math.hypot(dx, dy)
-    if d == 0.0 or d > r0 + r1 + 1e-6 or d < abs(r0 - r1) - 1e-6:
-        return []
-    a  = (r0*r0 - r1*r1 + d*d) / (2.0 * d)
-    h  = math.sqrt(max(r0*r0 - a*a, 0.0))
-    xm = x0 + a*dx/d
-    ym = y0 + a*dy/d
-    ux, uy = -dy/d, dx/d
-    pts = [(xm + h*ux, ym + h*uy), (xm - h*ux, ym - h*uy)]
-    return pts[:1] if h < 1e-6 else pts
-
-
-def forward_kinematics(th_a, th_b):
-    """
-    Given the two motor angles (rad, CCW from +X) return the pen (x, y),
-    or None if the elbows are too far apart for the distal links to close.
-    Picks the upper assembly branch (pen above the base) to match the working
-    configuration the IK solver targets.
-    """
-    ax, ay = -LINK_BASE / 2.0, 0.0
-    bx, by =  LINK_BASE / 2.0, 0.0
-    # Elbow positions from the proximal links.
-    e1x = ax + LINK_PROX * math.cos(th_a)
-    e1y = ay + LINK_PROX * math.sin(th_a)
-    e2x = bx + LINK_PROX * math.cos(th_b)
-    e2y = by + LINK_PROX * math.sin(th_b)
-    # Pen = intersection of the two distal-link circles; take the higher one.
-    pts = _circle_intersections(e1x, e1y, LINK_DIST, e2x, e2y, LINK_DIST)
-    if not pts:
-        return None
-    return max(pts, key=lambda q: q[1])
-
 
 def _angle_to_steps(theta_rad, home_deg, dir_sign):
     delta = theta_rad - math.radians(home_deg)
@@ -158,11 +141,26 @@ except Exception as exc:
 _pos_a = 0
 _pos_b = 0
 
+# Current servo pulse width (µs); the pen starts raised.
+_servo_us = SERVO_UP_US
+
 
 def _setup_gpio():
-    # Claim every line in the OFF (idle) state so no opto conducts at startup.
+    # Claim every opto line in the OFF (idle) state so no opto conducts at startup.
     for pin in (A_STEP, A_DIR, A_ENA, B_STEP, B_DIR, B_ENA):
         lgpio.gpio_claim_output(_h, pin, _OFF)
+    # Claim the servo signal line and park the pen in the raised position.
+    lgpio.gpio_claim_output(_h, SERVO_PIN, 0)
+    _set_servo(SERVO_UP_US)
+
+
+def _set_servo(us):
+    """Command the end-effector servo to a pulse width (µs), clamped to the safe
+    range.  Uses lgpio's background servo-pulse generator, so the signal keeps
+    refreshing on its own without blocking the motion loop."""
+    global _servo_us
+    _servo_us = max(SERVO_MIN_US, min(SERVO_MAX_US, us))
+    lgpio.tx_servo(_h, SERVO_PIN, int(round(_servo_us)), SERVO_FREQ_HZ)
 
 
 def _enable(on: bool):
@@ -254,12 +252,15 @@ def _move_to(target_a, target_b):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _state = {
-    'dpad_x':  0,
-    'dpad_y':  0,
-    'stick_a': 0.0,   # left  stick Y → motor A
-    'stick_b': 0.0,   # right stick Y → motor B
-    'home':    False,
-    'quit':    False,
+    'dpad_x':   0,
+    'dpad_y':   0,
+    'stick_a':  0.0,   # left  stick Y → motor A
+    'stick_b':  0.0,   # right stick Y → motor B
+    'pen_up':   False, # L1 → raise servo to SERVO_UP_US
+    'pen_down': False, # R1 → lower servo to SERVO_DOWN_US
+    'servo_d':  0,     # Triangle/Cross nudges, accumulated (± per press)
+    'home':     False,
+    'quit':     False,
 }
 _state_lock = threading.Lock()
 
@@ -292,9 +293,13 @@ def _input_thread():
                     elif ev.code == 'ABS_HAT0Y': _state['dpad_y']  = ev.state
                     elif ev.code == 'ABS_Y':     _state['stick_a'] = _norm_axis(ev.state)
                     elif ev.code == 'ABS_RY':    _state['stick_b'] = _norm_axis(ev.state)
-                elif ev.ev_type == 'Key':
-                    if   ev.code == 'BTN_START'  and ev.state == 1: _state['home'] = True
-                    elif ev.code == 'BTN_SELECT' and ev.state == 1: _state['quit'] = True
+                elif ev.ev_type == 'Key' and ev.state == 1:
+                    if   ev.code == 'BTN_START':  _state['home']     = True
+                    elif ev.code == 'BTN_SELECT': _state['quit']     = True
+                    elif ev.code == 'BTN_TL':     _state['pen_up']   = True   # L1
+                    elif ev.code == 'BTN_TR':     _state['pen_down'] = True   # R1
+                    elif ev.code == 'BTN_NORTH':  _state['servo_d'] += 1      # Triangle
+                    elif ev.code == 'BTN_SOUTH':  _state['servo_d'] -= 1      # Cross
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,15 +311,11 @@ def _clamp_deg(deg):
 
 
 def _command(th_a_deg, th_b_deg):
-    """Drive both motors to the given joint angles (deg).  Prints the FK pen pos."""
+    """Drive both motors to the given joint angles (deg) and report them."""
     ta = _angle_to_steps(math.radians(th_a_deg), THETA_A_HOME_DEG, DIR_A)
     tb = _angle_to_steps(math.radians(th_b_deg), THETA_B_HOME_DEG, DIR_B)
     _move_to(ta, tb)
-    pen = forward_kinematics(math.radians(th_a_deg), math.radians(th_b_deg))
-    if pen is None:
-        print(f"[joints] A={th_a_deg:6.2f}°  B={th_b_deg:6.2f}°  pen=(open — links can't close)")
-    else:
-        print(f"[joints] A={th_a_deg:6.2f}°  B={th_b_deg:6.2f}°  pen=({pen[0]:6.2f}, {pen[1]:6.2f})")
+    print(f"[joints] A={th_a_deg:6.2f}°  B={th_b_deg:6.2f}°")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,9 +330,10 @@ def main():
 
     th_a = THETA_A_HOME_DEG
     th_b = THETA_B_HOME_DEG
-    print(f"[fk_test] homing → A={th_a:.1f}°  B={th_b:.1f}°")
+    print(f"[jog_test] homing → A={th_a:.1f}°  B={th_b:.1f}°")
     _command(th_a, th_b)
-    print("[fk_test] ready — sticks/d-pad move joints  |  Start = home  |  Select = quit")
+    print("[jog_test] ready — sticks/d-pad jog each motor  |  L1/R1 = pen up/down  |  "
+          "Triangle/Cross = servo trim  |  Start = home  |  Select = quit")
 
     tick      = 1.0 / LOOP_HZ
     prev_dpad = {'x': 0, 'y': 0}
@@ -342,11 +344,26 @@ def main():
 
             with _state_lock:
                 s = dict(_state)
-                _state['home'] = False   # consume one-shot flags
+                # consume one-shot flags
+                _state['home']     = False
+                _state['pen_up']   = False
+                _state['pen_down'] = False
+                _state['servo_d']  = 0
 
             if s['quit']:
-                print("[fk_test] quit")
+                print("[jog_test] quit")
                 break
+
+            # End-effector servo — presets and live trim.
+            if s['pen_up']:
+                _set_servo(SERVO_UP_US)
+                print(f"[servo] pen up   → {_servo_us:.0f} µs")
+            if s['pen_down']:
+                _set_servo(SERVO_DOWN_US)
+                print(f"[servo] pen down → {_servo_us:.0f} µs")
+            if s['servo_d']:
+                _set_servo(_servo_us + s['servo_d'] * SERVO_NUDGE_US)
+                print(f"[servo] trim     → {_servo_us:.0f} µs")
 
             if s['home']:
                 th_a, th_b = THETA_A_HOME_DEG, THETA_B_HOME_DEG
@@ -389,11 +406,12 @@ def main():
                 time.sleep(tick - elapsed)
 
     except KeyboardInterrupt:
-        print("\n[fk_test] interrupted")
+        print("\n[jog_test] interrupted")
     finally:
         _enable(False)
+        lgpio.tx_servo(_h, SERVO_PIN, 0)   # stop servo pulses
         lgpio.gpiochip_close(_h)
-        print("[fk_test] motors disabled, GPIO released")
+        print("[jog_test] motors disabled, servo released, GPIO released")
 
 
 if __name__ == '__main__':
