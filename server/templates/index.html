@@ -180,6 +180,63 @@
   .status { margin-top: 14px; font-size: 14px; min-height: 20px; text-align: center; }
   .status.ok { color: var(--ok); }
   .status.err { color: var(--err); }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex; gap: 6px; margin-bottom: 22px;
+    background: var(--card); border: 1px solid var(--dash);
+    border-radius: 14px; padding: 5px;
+  }
+  .tab-btn {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    border: none; background: none; cursor: pointer;
+    font: 650 15px/1 inherit; color: var(--ink-soft);
+    padding: 11px 12px; border-radius: 10px;
+    transition: background .15s, color .15s;
+  }
+  .tab-btn.active { background: var(--accent); color: #fff; }
+  .tab-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .tab-panel.hidden { display: none; }
+
+  /* ── Motor calibration ── */
+  .motor-card {
+    background: var(--card); border: 1px solid var(--dash); border-radius: 18px;
+    padding: 18px; display: flex; flex-direction: column; gap: 16px;
+  }
+  .motor-block { display: flex; flex-direction: column; gap: 10px; }
+  .motor-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .motor-name { font-weight: 650; font-size: 15px; }
+  .jog-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .jog-btn {
+    -webkit-appearance: none; appearance: none; cursor: pointer;
+    font: 650 15px/1 inherit; color: var(--ink);
+    background: var(--bg); border: 1.5px solid var(--dash); border-radius: 14px;
+    padding: 18px 12px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    transition: border-color .15s, background .15s, transform .05s;
+  }
+  .jog-btn svg { width: 22px; height: 22px; }
+  .jog-btn:hover { border-color: var(--accent); }
+  .jog-btn:active { transform: translateY(1px); background: var(--badge); }
+  .jog-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .jog-btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .jog-btn.pressed { border-color: var(--accent); background: var(--badge); }
+
+  .kbd-hint {
+    display: flex; flex-wrap: wrap; gap: 8px 18px;
+    font-size: 13px; color: var(--ink-soft);
+  }
+  .kbd-hint > div { display: flex; align-items: center; gap: 6px; }
+  .kbd {
+    font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
+    min-width: 20px; padding: 4px 6px; text-align: center;
+    background: var(--bg); border: 1px solid var(--dash);
+    border-bottom-width: 2px; border-radius: 6px; color: var(--ink);
+  }
+  .pos-badge {
+    font: 600 12px/1 inherit; padding: 6px 10px; border-radius: 999px;
+    background: var(--dash); color: var(--ink-soft); flex-shrink: 0;
+  }
+  .pos-badge.cal { background: var(--badge); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -196,6 +253,15 @@
     <h1>Photo Plotter</h1>
     <p class="sub">Capture or select a photo, then send it to the plotter.</p>
   </div>
+
+  <!-- Tab switcher -->
+  <div class="tabs" role="tablist">
+    <button class="tab-btn active" id="tabPlot"      role="tab" type="button">Plot</button>
+    <button class="tab-btn"        id="tabCalibrate" role="tab" type="button">Calibrate</button>
+  </div>
+
+  <!-- ── Plot tab ── -->
+  <div class="tab-panel" id="plotTab" role="tabpanel">
 
   <!-- Entry: two ways to pick a photo -->
   <div class="cards" id="cards">
@@ -344,6 +410,97 @@
     <button class="link" id="resetBtn" type="button">Choose a different photo</button>
     <p class="status" id="status" role="status" aria-live="polite"></p>
   </div>
+
+  </div><!-- /#plotTab -->
+
+  <!-- ── Calibrate tab ── -->
+  <div class="tab-panel hidden" id="motorTab" role="tabpanel">
+    <div class="motor-card">
+      <p class="set-note" style="margin:0">
+        Jog each arm toward its limit switch. The moment the switch trips, that
+        arm's angle locks to its known reference and starts tracking — until then
+        the angle is unknown. Use the buttons or your keyboard.
+      </p>
+
+      <div class="kbd-hint">
+        <div><span class="kbd">←</span><span class="kbd">→</span> Motor A</div>
+        <div><span class="kbd">↑</span><span class="kbd">↓</span> Motor B</div>
+        <div><span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span> Step size</div>
+      </div>
+
+      <!-- Step size -->
+      <div class="set-row">
+        <div class="set-left">
+          <div class="set-label">Step size</div>
+          <div class="set-note">Degrees of output-shaft rotation per press</div>
+        </div>
+        <div class="seg" role="group" aria-label="Step size">
+          <button class="seg-btn"        id="stepSmall"  type="button">1°</button>
+          <button class="seg-btn active" id="stepMedium" type="button">5°</button>
+          <button class="seg-btn"        id="stepLarge"  type="button">15°</button>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Motor A -->
+      <div class="motor-block">
+        <div class="motor-head">
+          <div class="motor-name">Motor A · left arm</div>
+          <span class="pos-badge" id="badgeA">not homed</span>
+        </div>
+        <div class="jog-row">
+          <button class="jog-btn" data-motor="A" data-dir="ccw" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 8 8 8"/>
+            </svg>
+            CCW
+          </button>
+          <button class="jog-btn" data-motor="A" data-dir="cw" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 8 16 8"/>
+            </svg>
+            CW
+          </button>
+        </div>
+      </div>
+
+      <!-- Motor B -->
+      <div class="motor-block">
+        <div class="motor-head">
+          <div class="motor-name">Motor B · right arm</div>
+          <span class="pos-badge" id="badgeB">not homed</span>
+        </div>
+        <div class="jog-row">
+          <button class="jog-btn" data-motor="B" data-dir="ccw" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 8 8 8"/>
+            </svg>
+            CCW
+          </button>
+          <button class="jog-btn" data-motor="B" data-dir="cw" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 8 16 8"/>
+            </svg>
+            CW
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Tracked position + overall state -->
+      <div class="set-row">
+        <div class="set-left">
+          <div class="set-label">Tracked position</div>
+          <div class="set-note" id="posReadout">Motor A 0.0° · Motor B 0.0°</div>
+        </div>
+        <span class="pos-badge" id="calBadge">uncalibrated</span>
+      </div>
+
+      <p class="status" id="motorStatus" role="status" aria-live="polite"></p>
+    </div>
+  </div><!-- /#motorTab -->
 
 </div>
 
@@ -532,9 +689,153 @@
     return b.toFixed(i ? 1 : 0) + ' ' + u[i];
   }
 
+  // ── tab switching ────────────────────────────────────────────────────────────
+  const tabPlot      = document.getElementById('tabPlot');
+  const tabCalibrate = document.getElementById('tabCalibrate');
+  const plotTab      = document.getElementById('plotTab');
+  const motorTab     = document.getElementById('motorTab');
+
+  function selectTab(which) {
+    const plot = which === 'plot';
+    tabPlot.classList.toggle('active', plot);
+    tabCalibrate.classList.toggle('active', !plot);
+    plotTab.classList.toggle('hidden', !plot);
+    motorTab.classList.toggle('hidden', plot);
+  }
+  tabPlot.addEventListener('click',      () => selectTab('plot'));
+  tabCalibrate.addEventListener('click', () => selectTab('calibrate'));
+
+  // ── motor calibration ────────────────────────────────────────────────────────
+  const motorStatus = document.getElementById('motorStatus');
+  const posReadout  = document.getElementById('posReadout');
+  const calBadge    = document.getElementById('calBadge');
+  const badgeA      = document.getElementById('badgeA');
+  const badgeB      = document.getElementById('badgeB');
+  const stepBtns = { 1: document.getElementById('stepSmall'),
+                     5: document.getElementById('stepMedium'),
+                     15: document.getElementById('stepLarge') };
+  let motorStep = 5;
+  let jogBusy = false;
+
+  function applyStepUI() {
+    for (const [deg, btn] of Object.entries(stepBtns)) {
+      btn.classList.toggle('active', +deg === motorStep);
+    }
+  }
+  for (const [deg, btn] of Object.entries(stepBtns)) {
+    btn.addEventListener('click', () => { motorStep = +deg; applyStepUI(); });
+  }
+
+  const jogBtns = document.querySelectorAll('.jog-btn');
+  jogBtns.forEach(btn => {
+    btn.addEventListener('click', () => jog(btn.dataset.motor, btn.dataset.dir));
+  });
+
+  function btnFor(motor, direction) {
+    return document.querySelector(`.jog-btn[data-motor="${motor}"][data-dir="${direction}"]`);
+  }
+
+  function setMotorStatus(msg, kind) {
+    motorStatus.textContent = msg;
+    motorStatus.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function setBadge(el, homed) {
+    el.textContent = homed ? 'homed' : 'not homed';
+    el.classList.toggle('cal', !!homed);
+  }
+
+  function fmtAngle(deg, homed) {
+    return homed && deg != null ? `${deg.toFixed(1)}°` : 'unknown';
+  }
+
+  function renderPosition(pos) {
+    if (!pos) return;
+    posReadout.textContent =
+      `Motor A ${fmtAngle(pos.motor_a_deg, pos.a_homed)} · Motor B ${fmtAngle(pos.motor_b_deg, pos.b_homed)}`;
+    setBadge(badgeA, pos.a_homed);
+    setBadge(badgeB, pos.b_homed);
+    calBadge.textContent = pos.calibrated ? 'calibrated' : 'uncalibrated';
+    calBadge.classList.toggle('cal', !!pos.calibrated);
+  }
+
+  async function jog(motor, direction) {
+    if (jogBusy) return;                       // one move at a time — avoids key-repeat floods
+    jogBusy = true;
+    jogBtns.forEach(b => b.disabled = true);
+    setMotorStatus(`Motor ${motor} ${direction.toUpperCase()} ${motorStep}°…`, '');
+    try {
+      const res = await fetch('/motor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ motor, direction, degrees: motorStep }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        renderPosition(data.position);
+        if (data.limit) {
+          setMotorStatus(`Arm ${motor} hit its limit switch — homed at its known angle.`, 'ok');
+        } else {
+          setMotorStatus(
+            data.forwarded === false
+              ? `Motor ${motor} ${direction.toUpperCase()} ${motorStep}° (no device connected).`
+              : `Motor ${motor} moved ${direction.toUpperCase()} ${motorStep}°.`,
+            'ok');
+        }
+      } else {
+        setMotorStatus(data.error || `Jog failed (HTTP ${res.status}).`, 'err');
+      }
+    } catch (_) {
+      setMotorStatus("Could not reach the plotter. Check you're on the same Wi-Fi.", 'err');
+    } finally {
+      jogBtns.forEach(b => b.disabled = false);
+      jogBusy = false;
+    }
+  }
+
+  // keyboard jog — active only while the Calibrate tab is visible
+  const keyMap = {
+    ArrowLeft: ['A', 'ccw'], ArrowRight: ['A', 'cw'],
+    ArrowUp:   ['B', 'cw'],  ArrowDown:  ['B', 'ccw'],
+  };
+  document.addEventListener('keydown', e => {
+    if (motorTab.classList.contains('hidden')) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+
+    if (e.key === '1' || e.key === '2' || e.key === '3') {
+      motorStep = { '1': 1, '2': 5, '3': 15 }[e.key];
+      applyStepUI();
+      e.preventDefault();
+      return;
+    }
+    const bind = keyMap[e.key];
+    if (!bind) return;
+    e.preventDefault();
+    const btn = btnFor(bind[0], bind[1]);
+    if (btn) btn.classList.add('pressed');
+    jog(bind[0], bind[1]);
+  });
+  document.addEventListener('keyup', e => {
+    const bind = keyMap[e.key];
+    if (!bind) return;
+    const btn = btnFor(bind[0], bind[1]);
+    if (btn) btn.classList.remove('pressed');
+  });
+
+  async function loadPosition() {
+    try {
+      const res = await fetch('/position');
+      const data = await res.json();
+      if (data.ok) renderPosition(data.position);
+    } catch (_) {}
+  }
+
   // ── init ─────────────────────────────────────────────────────────────────────
   loadCfg();
   applyCfgToUI();
+  applyStepUI();
+  loadPosition();
 </script>
 </body>
 </html>

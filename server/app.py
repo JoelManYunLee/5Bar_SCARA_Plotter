@@ -16,9 +16,11 @@ Then open http://<pi-lan-ip>:5000 on your phone (same Wi-Fi network).
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
+import threading
 import time
 import uuid
 
@@ -28,7 +30,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
-from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device
+from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 OUTPUTS_FOLDER = os.path.join(BASE_DIR, "outputs")
@@ -39,8 +41,51 @@ os.makedirs(OUTPUTS_FOLDER, exist_ok=True)
 PLOTTER_IP = os.environ.get("PLOTTER_IP")
 PLOTTER_PORT = int(os.environ.get("PLOTTER_PORT", "9000"))
 
+# Known output-shaft angle where each arm's limit switch engages. Until an arm
+# trips its switch its angle is unknown; the trip fixes it to this reference and
+# tracking begins from there.
+LIMIT_A_DEG = float(os.environ.get("LIMIT_A_DEG", "90"))
+LIMIT_B_DEG = float(os.environ.get("LIMIT_B_DEG", "90"))
+
 # Overridden to True by --sim at startup; False when running on real hardware.
 SIM_MODE = False
+
+# Persisted motor position (output-shaft degrees) so calibration survives restarts.
+# Each arm's angle becomes known once it's homed against its limit switch; the
+# machine is calibrated when both arms are homed.
+POSITION_FILE = os.path.join(BASE_DIR, "position.json")
+_position_lock = threading.Lock()
+
+
+def load_position() -> dict:
+    try:
+        with open(POSITION_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    a_homed = bool(data.get("a_homed", False))
+    b_homed = bool(data.get("b_homed", False))
+    a_deg = data.get("motor_a_deg")
+    b_deg = data.get("motor_b_deg")
+    return {
+        # Angle is None (unknown) until the arm has tripped its limit switch.
+        "motor_a_deg": float(a_deg) if a_homed and a_deg is not None else None,
+        "motor_b_deg": float(b_deg) if b_homed and b_deg is not None else None,
+        "a_homed":     a_homed,
+        "b_homed":     b_homed,
+        "calibrated":  a_homed and b_homed,
+        "updated":     data.get("updated"),
+    }
+
+
+def save_position(pos: dict) -> dict:
+    pos["calibrated"] = bool(pos.get("a_homed")) and bool(pos.get("b_homed"))
+    pos["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    tmp = POSITION_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(pos, f, indent=2)
+    os.replace(tmp, POSITION_FILE)  # atomic write
+    return pos
 
 
 # Phone photos are big; allow generous headroom. HEIC/large JPEGs included.
@@ -139,6 +184,64 @@ def upload():
         url=f"/uploads/{name}",
         processing=processing,
     )
+
+
+@app.route("/motor", methods=["POST"])
+def motor():
+    """Jog one motor for limit-switch calibration.
+
+    Expects JSON {motor: "A"|"B", direction: "cw"|"ccw", degrees: <number>}
+    and forwards it to the plotter device when PLOTTER_IP is set.
+    """
+    data = request.get_json(silent=True) or {}
+    motor_id  = str(data.get("motor", "")).upper()
+    direction = str(data.get("direction", "")).lower()
+
+    if motor_id not in ("A", "B"):
+        return jsonify(ok=False, error="motor must be 'A' or 'B'."), 400
+    if direction not in ("cw", "ccw"):
+        return jsonify(ok=False, error="direction must be 'cw' or 'ccw'."), 400
+    try:
+        degrees = float(data.get("degrees", 5.0))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="degrees must be a number."), 400
+    if not 0 < degrees <= 360:
+        return jsonify(ok=False, error="degrees must be between 0 and 360."), 400
+
+    forwarded = False
+    limit = False
+    if PLOTTER_IP:
+        result = send_motor_command(motor_id, direction, degrees, PLOTTER_IP, PLOTTER_PORT)
+        if result is None:
+            return jsonify(ok=False, error="Could not reach the plotter device."), 502
+        forwarded = True
+        limit = result["limit"]
+
+    # A limit hit fixes the arm's known angle and starts tracking. Before that the
+    # angle is unknown; only an already-homed arm accumulates the jog.
+    delta = degrees if direction == "cw" else -degrees
+    with _position_lock:
+        pos = load_position()
+        if motor_id == "A":
+            if limit:
+                pos["motor_a_deg"], pos["a_homed"] = LIMIT_A_DEG, True
+            elif pos["a_homed"]:
+                pos["motor_a_deg"] = round(pos["motor_a_deg"] + delta, 3)
+        else:
+            if limit:
+                pos["motor_b_deg"], pos["b_homed"] = LIMIT_B_DEG, True
+            elif pos["b_homed"]:
+                pos["motor_b_deg"] = round(pos["motor_b_deg"] + delta, 3)
+        pos = save_position(pos)
+
+    return jsonify(ok=True, forwarded=forwarded, limit=limit, position=pos)
+
+
+@app.route("/position")
+def position():
+    """Return the last known motor position and calibration state."""
+    with _position_lock:
+        return jsonify(ok=True, position=load_position())
 
 
 @app.route("/uploads/<path:filename>")

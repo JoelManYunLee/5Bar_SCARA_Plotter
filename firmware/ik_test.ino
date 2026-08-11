@@ -37,7 +37,7 @@
 
 // ── Motor / drivetrain configuration ──────────────────────────────────────────
 #define MOTOR_FULL_STEPS   200      // NEMA-17, 1.8° per full step
-#define MICROSTEPS         16       // driver microstep setting (match DIP/jumpers)
+#define MICROSTEPS         4        // TB6600 microstep DIP setting
 #define GEAR_RATIO         32.0f    // harmonic drive reduction (output : motor)
 
 #define STEPS_PER_REV   (MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO)

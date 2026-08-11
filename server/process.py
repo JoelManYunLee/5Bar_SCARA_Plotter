@@ -366,6 +366,42 @@ def send_to_device(paths, weights, w: int, h: int, ip: str,
         return False
 
 
+def send_motor_command(motor: str, direction: str, degrees: float, ip: str,
+                       port: int = 9000, timeout: float = 5.0):
+    """Jog a single motor for calibration.
+
+    POSTs to http://<ip>:<port>/motor so the firmware can turn one motor a fixed
+    amount. ``motor`` is "A" or "B", ``direction`` is "cw" or "ccw", ``degrees``
+    is the output-shaft rotation. The firmware stops early if that arm's limit
+    switch engages. Returns ``{"limit": bool}`` on success, or ``None`` if the
+    device is unreachable.
+    """
+    import urllib.request
+    import urllib.error
+    body = json.dumps({
+        "motor":     motor,
+        "direction": direction,
+        "degrees":   round(float(degrees), 3),
+    }).encode()
+    req = urllib.request.Request(
+        f"http://{ip}:{port}/motor",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status >= 400:
+                return None
+            try:
+                info = json.loads(resp.read().decode())
+            except (ValueError, UnicodeDecodeError):
+                info = {}
+            return {"limit": bool(info.get("limit", False))}
+    except urllib.error.URLError:
+        return None
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
