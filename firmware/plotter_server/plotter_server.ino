@@ -7,10 +7,17 @@
  * reference), and absolute step tracking begins from there. Positions survive
  * power cycles via NVS, so the machine stays calibrated between sessions.
  *
+ * Once both arms are homed, the firmware solves forward kinematics for the pen
+ * position, moves to a symmetric 45°-above-horizontal ready pose, and from there
+ * begins accepting /plot stroke instructions from the server.
+ *
  *   POST /motor   {motor:"A"|"B", direction:"cw"|"ccw", degrees:<n>}
  *                 → jog; stop early if the switch engages
  *                 ← {ok:true, limit:<bool>, homed:<bool>, position_deg:<n|null>}
- *   GET  /position → {ok:true, a:{homed,deg}, b:{homed,deg}}
+ *   POST /plot    {width,height,paths,weights}  (only after both arms homed)
+ *                 → fit into the drawing area, run IK, stream strokes with pen lift
+ *                 ← {ok:true, accepted:{paths,points}}  (202; drawing runs async)
+ *   GET  /position → {ok:true, ready:<bool>, plotting:<bool>, a:{homed,deg}, b:{homed,deg}}
  *   GET  /         → health text
  *
  * Drivetrain: NEMA-17 (200 full steps) → TB6600 @ 1/4 microstep → 32:1 harmonic.
@@ -20,6 +27,7 @@
  *   • esp32 board package  (WiFi, WebServer, Preferences)
  *   • AccelStepper  ≥ 1.64
  *   • ArduinoJson   ≥ 6.0
+ *   • ESP32Servo    ≥ 1.1   (pen lift)
  */
 
 #include <WiFi.h>
@@ -27,6 +35,8 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <AccelStepper.h>
+#include <ESP32Servo.h>
+#include <vector>
 #include <math.h>
 
 // ── Network ────────────────────────────────────────────────────────────────────
@@ -46,6 +56,19 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 // LIMIT_A_DEG / LIMIT_B_DEG on the server so hardware and server agree on zero.
 #define LIMIT_A_DEG   90.0f
 #define LIMIT_B_DEG   90.0f
+
+// ── Five-bar geometry (mirrors sim/simulator.py and ik_test.ino) ───────────────
+#define LINK_BASE   8.0f    // distance between the two motor shafts
+#define LINK_PROX   6.0f    // proximal link, motor → elbow
+#define LINK_DIST   9.0f    // distal link,  elbow → pen
+
+// Ready pose struck once both arms are homed: each proximal link 45° above the
+// horizontal, symmetric about +Y (left arm 135°, right arm 45°, CCW from +X).
+#define READY_A_DEG   135.0f
+#define READY_B_DEG   45.0f
+
+// Pen is the lower of the two four-bar solutions (hangs below the elbows).
+#define PEN_LOWER_SOLUTION   1
 
 // If a motor turns the wrong way, flip its sign here (+1 or -1).
 #define DIR_A   (+1)
@@ -69,12 +92,50 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 #define JOG_MAX_SPEED   2000.0f   // steps/s (slow enough to catch the switch)
 #define JOG_ACCEL       4000.0f   // steps/s²
 
+// ── Pen lift servo ─────────────────────────────────────────────────────────────
+#define PEN_SERVO_PIN     13
+#define PEN_MIN_US        500     // servo pulse bounds passed to attach()
+#define PEN_MAX_US        2500
+#define PEN_UP_US         1500    // pen clear of the paper
+#define PEN_DOWN_LIGHT_US 1750    // light contact  (stroke weight → 0)
+#define PEN_DOWN_HEAVY_US 1950    // full pressure  (stroke weight → 1)
+#define PEN_SETTLE_MS     220     // time for the servo to reach position
+
+// ── Drawing area: the image is fitted into this rectangle (robot units) ────────
+#define DRAW_CX   0.0f    // centre X of the drawing area
+#define DRAW_CY   7.0f    // centre Y
+#define DRAW_W    8.0f    // max width  (aspect ratio preserved)
+#define DRAW_H    6.0f    // max height
+
+// ── Draw motion profile & safety cap ───────────────────────────────────────────
+#define DRAW_MAX_SPEED   1500.0f
+#define DRAW_ACCEL       3000.0f
+#define MAX_PLOT_POINTS  3000     // guard ESP32 RAM; lower server detail if exceeded
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 AccelStepper motorA(AccelStepper::DRIVER, A_STEP_PIN, A_DIR_PIN);
 AccelStepper motorB(AccelStepper::DRIVER, B_STEP_PIN, B_DIR_PIN);
 WebServer    server(HTTP_PORT);
 Preferences  prefs;
+Servo        penServo;
+
+// Calibration / plotting state.
+static bool atReady      = false;  // reached the 45° ready pose, accepting /plot
+static bool pendingReady = false;  // both arms just homed → run the ready move
+static bool penDown      = false;
+
+// A drawing job, filled by /plot and executed one point per loop() so the HTTP
+// server stays responsive while the strokes stream out.
+struct PlotJob {
+  std::vector<float>    px, py;      // points in drawing space (robot units)
+  std::vector<uint32_t> pathBegin;   // index where each path starts
+  std::vector<float>    pathWeight;  // pen pressure per path (0..1)
+  bool     active  = false;
+  uint32_t pathIdx = 0;
+  uint32_t ptIdx   = 0;
+};
+static PlotJob job;
 
 struct Arm {
   AccelStepper* stepper;
@@ -114,7 +175,7 @@ static void restore(Arm& arm) {
 // switch. Returns true if the switch tripped during this move.
 static bool jog_arm(Arm& arm, const String& direction, float degrees) {
   long steps = lroundf(degrees * STEPS_PER_DEG);
-  int  sign  = (direction == "cw" ? +1 : -1) * arm.dirSign;
+  int  sign  = (direction == "ccw") ? +1 : -1;   // CCW increases the tracked angle
   arm.stepper->move(sign * steps);
 
   bool wasPressed = limit_pressed(arm);
@@ -136,6 +197,149 @@ static bool jog_arm(Arm& arm, const String& direction, float degrees) {
   return hit;
 }
 
+// ── Forward kinematics ──────────────────────────────────────────────────────────
+
+// Two circle intersections; returns the count, points written to out[][2].
+static int circle_intersections(float x0, float y0, float r0,
+                                float x1, float y1, float r1,
+                                float out[2][2]) {
+  float dx = x1 - x0, dy = y1 - y0;
+  float d  = sqrtf(dx * dx + dy * dy);
+  if (d == 0.0f || d > r0 + r1 || d < fabsf(r0 - r1)) return 0;
+  float a  = (r0 * r0 - r1 * r1 + d * d) / (2.0f * d);
+  float h  = sqrtf(fmaxf(r0 * r0 - a * a, 0.0f));
+  float xm = x0 + a * dx / d, ym = y0 + a * dy / d;
+  float ux = -dy / d, uy = dx / d;
+  out[0][0] = xm + h * ux;  out[0][1] = ym + h * uy;
+  out[1][0] = xm - h * ux;  out[1][1] = ym - h * uy;
+  return (h < 1e-6f) ? 1 : 2;
+}
+
+// End-effector (pen) position for the given motor angles (deg, CCW from +X).
+static bool forward_kinematics(float thetaA_deg, float thetaB_deg, float* px, float* py) {
+  float ta = radians(thetaA_deg), tb = radians(thetaB_deg);
+  float e1x = -LINK_BASE / 2.0f + LINK_PROX * cosf(ta), e1y = LINK_PROX * sinf(ta);
+  float e2x =  LINK_BASE / 2.0f + LINK_PROX * cosf(tb), e2y = LINK_PROX * sinf(tb);
+  float out[2][2];
+  int n = circle_intersections(e1x, e1y, LINK_DIST, e2x, e2y, LINK_DIST, out);
+  if (n == 0) return false;
+  int pick = 0;
+  if (n == 2) {
+    bool lowerIsOne = out[1][1] < out[0][1];
+    pick = (PEN_LOWER_SOLUTION ? lowerIsOne : !lowerIsOne) ? 1 : 0;
+  }
+  *px = out[pick][0];  *py = out[pick][1];
+  return true;
+}
+
+// Motor angles (radians, CCW from +X) for a pen target; picks the outward elbow
+// branch (left elbow left, right elbow right) matching sim/simulator.py.
+static bool inverse_kinematics(float px, float py, float* thA, float* thB) {
+  const float ax = -LINK_BASE / 2.0f, ay = 0.0f;
+  const float bx =  LINK_BASE / 2.0f, by = 0.0f;
+  float left[2][2], right[2][2];
+  int nl = circle_intersections(ax, ay, LINK_PROX, px, py, LINK_DIST, left);
+  int nr = circle_intersections(bx, by, LINK_PROX, px, py, LINK_DIST, right);
+  if (nl == 0 || nr == 0) return false;
+
+  float e1x = left[0][0], e1y = left[0][1];
+  if (nl == 2 && left[1][0] < e1x) { e1x = left[1][0]; e1y = left[1][1]; }
+  float e2x = right[0][0], e2y = right[0][1];
+  if (nr == 2 && right[1][0] > e2x) { e2x = right[1][0]; e2y = right[1][1]; }
+
+  *thA = atan2f(e1y - ay, e1x - ax);
+  *thB = atan2f(e2y - by, e2x - bx);
+  return true;
+}
+
+// Coordinated blocking move of both arms to target output angles (deg).
+static void move_to_angles(float thetaA_deg, float thetaB_deg) {
+  motorA.moveTo(lroundf(thetaA_deg * STEPS_PER_DEG));
+  motorB.moveTo(lroundf(thetaB_deg * STEPS_PER_DEG));
+  while (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) {
+    motorA.run();
+    motorB.run();
+  }
+  persist(armA);
+  persist(armB);
+}
+
+// Both arms just homed: report the pen position, then settle into the ready pose.
+static void go_ready() {
+  float x, y;
+  if (forward_kinematics(arm_position_deg(armA), arm_position_deg(armB), &x, &y))
+    Serial.printf("[fk] homed pen position = (%.2f, %.2f)\n", x, y);
+
+  Serial.printf("[ready] moving to 45° pose (A=%.0f°, B=%.0f°)\n", READY_A_DEG, READY_B_DEG);
+  move_to_angles(READY_A_DEG, READY_B_DEG);
+
+  if (forward_kinematics(READY_A_DEG, READY_B_DEG, &x, &y))
+    Serial.printf("[ready] pen at ready pose = (%.2f, %.2f)\n", x, y);
+  Serial.println("[plot] calibrated and ready — POST /plot to draw");
+}
+
+// ── Pen + plotting ──────────────────────────────────────────────────────────────
+
+static void pen_up() {
+  penServo.writeMicroseconds(PEN_UP_US);
+  delay(PEN_SETTLE_MS);
+  penDown = false;
+}
+
+static void pen_down(float weight) {
+  weight = constrain(weight, 0.0f, 1.0f);
+  int us = PEN_DOWN_LIGHT_US + (int)(weight * (PEN_DOWN_HEAVY_US - PEN_DOWN_LIGHT_US));
+  penServo.writeMicroseconds(us);
+  delay(PEN_SETTLE_MS);
+  penDown = true;
+}
+
+// Move the pen to a drawing-space point via IK. Returns false if unreachable.
+static bool move_to_xy(float x, float y) {
+  float ta, tb;
+  if (!inverse_kinematics(x, y, &ta, &tb)) return false;
+  motorA.moveTo(lroundf(degrees(ta) * STEPS_PER_DEG));
+  motorB.moveTo(lroundf(degrees(tb) * STEPS_PER_DEG));
+  while (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) {
+    motorA.run();
+    motorB.run();
+  }
+  return true;
+}
+
+static void plot_finish() {
+  if (penDown) pen_up();
+  move_to_angles(READY_A_DEG, READY_B_DEG);            // park at the ready pose
+  motorA.setMaxSpeed(JOG_MAX_SPEED); motorA.setAcceleration(JOG_ACCEL);
+  motorB.setMaxSpeed(JOG_MAX_SPEED); motorB.setAcceleration(JOG_ACCEL);
+  job.active = false;
+  job.px.clear(); job.py.clear();
+  job.pathBegin.clear(); job.pathWeight.clear();
+  job.px.shrink_to_fit(); job.py.shrink_to_fit();
+  Serial.println("[plot] complete — parked at ready pose");
+}
+
+// Draws one point per call so /position and future controls stay responsive.
+static void plot_step() {
+  uint32_t nPts   = job.px.size();
+  uint32_t nPaths = job.pathBegin.size();
+  if (job.ptIdx >= nPts) { plot_finish(); return; }
+
+  uint32_t pathEnd = (job.pathIdx + 1 < nPaths) ? job.pathBegin[job.pathIdx + 1] : nPts;
+  bool atStart = (job.ptIdx == job.pathBegin[job.pathIdx]);
+
+  if (atStart && penDown) pen_up();                    // lift before travelling to a new stroke
+  bool reached = move_to_xy(job.px[job.ptIdx], job.py[job.ptIdx]);
+  if (reached && atStart) pen_down(job.pathWeight[job.pathIdx]);
+
+  job.ptIdx++;
+  if (job.ptIdx >= pathEnd) {                           // stroke finished
+    if (penDown) pen_up();
+    job.pathIdx++;
+    if (job.pathIdx >= nPaths) plot_finish();
+  }
+}
+
 // ── HTTP handlers ──────────────────────────────────────────────────────────────
 
 static void send_json(int code, const String& body) {
@@ -144,6 +348,7 @@ static void send_json(int code, const String& body) {
 
 static void handle_motor() {
   if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
+  if (job.active)                  { send_json(409, "{\"ok\":false,\"error\":\"busy — plotting\"}"); return; }
 
   StaticJsonDocument<192> doc;
   if (deserializeJson(doc, server.arg("plain"))) {
@@ -162,7 +367,9 @@ static void handle_motor() {
   if (dir != "cw" && dir != "ccw"){ send_json(400, "{\"ok\":false,\"error\":\"direction must be cw or ccw\"}"); return; }
   if (deg <= 0 || deg > 360)      { send_json(400, "{\"ok\":false,\"error\":\"degrees out of range\"}"); return; }
 
+  bool wasCalibrated = armA.homed && armB.homed;
   bool hit = jog_arm(*arm, dir, deg);
+  if (!wasCalibrated && armA.homed && armB.homed) pendingReady = true;  // ready move runs in loop()
 
   String posStr = arm->homed ? String(arm_position_deg(*arm), 3) : String("null");
   String body = String("{\"ok\":true,\"motor\":\"") + motor +
@@ -175,10 +382,69 @@ static void handle_motor() {
 static void handle_position() {
   String aPos = armA.homed ? String(arm_position_deg(armA), 3) : String("null");
   String bPos = armB.homed ? String(arm_position_deg(armB), 3) : String("null");
-  String body = String("{\"ok\":true,\"a\":{\"homed\":") + (armA.homed ? "true" : "false") +
+  String body = String("{\"ok\":true,\"ready\":") + (atReady ? "true" : "false") +
+                ",\"plotting\":" + (job.active ? "true" : "false") +
+                ",\"a\":{\"homed\":" + (armA.homed ? "true" : "false") +
                 ",\"deg\":" + aPos + "},\"b\":{\"homed\":" + (armB.homed ? "true" : "false") +
                 ",\"deg\":" + bPos + "}}";
   send_json(200, body);
+}
+
+static void handle_plot() {
+  if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
+  if (!atReady)   { send_json(409, "{\"ok\":false,\"error\":\"not ready — home both arms first\"}"); return; }
+  if (job.active) { send_json(409, "{\"ok\":false,\"error\":\"busy — a plot is already running\"}"); return; }
+
+  // The stroke JSON can be large; size the parser from the biggest free block.
+  DynamicJsonDocument doc((ESP.getMaxAllocHeap() * 3) / 4);
+  if (deserializeJson(doc, server.arg("plain"))) {
+    send_json(400, "{\"ok\":false,\"error\":\"bad or too-large JSON — lower detail\"}");
+    return;
+  }
+
+  float w = doc["width"]  | 0.0f;
+  float h = doc["height"] | 0.0f;
+  JsonArray paths   = doc["paths"].as<JsonArray>();
+  JsonArray weights = doc["weights"].as<JsonArray>();
+  if (paths.isNull() || w <= 0.0f || h <= 0.0f) {
+    send_json(400, "{\"ok\":false,\"error\":\"missing width/height/paths\"}");
+    return;
+  }
+
+  // Fit the image into the drawing rectangle, aspect preserved, Y flipped
+  // (image origin is top-left y-down; robot space is y-up).
+  float scale = fminf(DRAW_W / w, DRAW_H / h);
+
+  job.px.clear(); job.py.clear(); job.pathBegin.clear(); job.pathWeight.clear();
+  uint32_t total = 0, pi = 0;
+  for (JsonArray path : paths) {
+    if (path.size() < 1) { pi++; continue; }
+    if (total + path.size() > MAX_PLOT_POINTS) {
+      job.px.clear(); job.py.clear(); job.pathBegin.clear(); job.pathWeight.clear();
+      send_json(413, "{\"ok\":false,\"error\":\"too many points — lower detail on the server\"}");
+      return;
+    }
+    job.pathBegin.push_back(total);
+    job.pathWeight.push_back(pi < weights.size() ? (float)weights[pi] : 1.0f);
+    for (JsonArray pt : path) {
+      float ix = pt[0], iy = pt[1];
+      job.px.push_back(DRAW_CX + (ix - w / 2.0f) * scale);
+      job.py.push_back(DRAW_CY - (iy - h / 2.0f) * scale);
+      total++;
+    }
+    pi++;
+  }
+
+  if (total == 0) { send_json(400, "{\"ok\":false,\"error\":\"no drawable points\"}"); return; }
+
+  motorA.setMaxSpeed(DRAW_MAX_SPEED); motorA.setAcceleration(DRAW_ACCEL);
+  motorB.setMaxSpeed(DRAW_MAX_SPEED); motorB.setAcceleration(DRAW_ACCEL);
+  job.pathIdx = 0; job.ptIdx = 0; job.active = true;   // execution runs in loop()
+
+  Serial.printf("[plot] accepted %u paths, %u points\n", (unsigned)job.pathBegin.size(), (unsigned)total);
+  String body = String("{\"ok\":true,\"accepted\":{\"paths\":") + (unsigned)job.pathBegin.size() +
+                ",\"points\":" + (unsigned)total + "}}";
+  send_json(202, body);
 }
 
 static void handle_root() {
@@ -191,6 +457,7 @@ static void setup_arm(Arm& arm) {
   pinMode(arm.enPin, OUTPUT);
   digitalWrite(arm.enPin, DRIVER_ENABLE_ACTIVE_LOW ? LOW : HIGH);  // enable driver
   pinMode(arm.limitPin, INPUT_PULLUP);
+  arm.stepper->setPinsInverted(arm.dirSign < 0, false, false);  // DIR sign → CCW = +position
   arm.stepper->setMaxSpeed(JOG_MAX_SPEED);
   arm.stepper->setAcceleration(JOG_ACCEL);
   restore(arm);
@@ -204,9 +471,15 @@ void setup() {
   setup_arm(armA);
   setup_arm(armB);
 
+  ESP32PWM::allocateTimer(0);
+  penServo.setPeriodHertz(50);
+  penServo.attach(PEN_SERVO_PIN, PEN_MIN_US, PEN_MAX_US);
+  pen_up();
+
   Serial.printf("[geom] steps/rev=%.0f  steps/deg=%.3f\n", (float)STEPS_PER_REV, STEPS_PER_DEG);
   Serial.printf("[cal] A homed=%d %.2f°  B homed=%d %.2f°\n",
                 armA.homed, arm_position_deg(armA), armB.homed, arm_position_deg(armB));
+  if (armA.homed && armB.homed) atReady = true;  // already calibrated from NVS; no boot-time motion
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -216,6 +489,7 @@ void setup() {
 
   server.on("/", HTTP_GET, handle_root);
   server.on("/motor", HTTP_POST, handle_motor);
+  server.on("/plot", HTTP_POST, handle_plot);
   server.on("/position", HTTP_GET, handle_position);
   server.begin();
   Serial.println("[http] server started");
@@ -223,4 +497,10 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  if (pendingReady) {           // both arms just homed → FK + move to 45° ready pose
+    pendingReady = false;
+    go_ready();
+    atReady = true;
+  }
+  if (job.active) plot_step();  // stream the current drawing, one point per loop
 }
