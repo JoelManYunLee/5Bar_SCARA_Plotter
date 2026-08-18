@@ -1,8 +1,8 @@
 {
-  "motor_a_deg": 135.0,
-  "motor_b_deg": 50.0,
-  "a_homed": true,
-  "b_homed": true,
-  "calibrated": true,
-  "updated": "2026-08-18T16:13:30"
+  "motor_a_deg": null,
+  "motor_b_deg": null,
+  "a_homed": false,
+  "b_homed": false,
+  "calibrated": false,
+  "updated": "2026-08-18T16:32:25"
 }
