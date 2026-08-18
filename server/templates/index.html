@@ -415,6 +415,7 @@
     <p class="meta" id="meta"></p>
     <div class="bar" id="bar"><span id="barFill"></span></div>
     <button class="btn btn-primary" id="sendBtn" type="button">Send to plotter</button>
+    <p class="set-note" id="calGateNote" style="text-align:center; display:none">Calibrate both arms in the Calibrate tab before sending to the plotter.</p>
     <button class="link" id="resetBtn" type="button">Choose a different photo</button>
     <p class="status" id="status" role="status" aria-live="polite"></p>
 
@@ -569,6 +570,14 @@
   const statusEl     = document.getElementById('status');
   const plotPreview     = document.getElementById('plotPreview');
   const plotPreviewNote = document.getElementById('plotPreviewNote');
+  const calGateNote     = document.getElementById('calGateNote');
+
+  // Arm angles are unknown until both are homed; block sending until calibrated.
+  let machineCalibrated = false;
+  function updateSendGate() {
+    sendBtn.disabled = !chosen || !machineCalibrated;
+    calGateNote.style.display = (chosen && !machineCalibrated) ? '' : 'none';
+  }
 
   // ── settings state ──────────────────────────────────────────────────────────
   const DEFAULTS = { mode:'edges', multiscale:false, shade:false,
@@ -668,7 +677,7 @@
     cards.classList.add('hide');
     settingsPanel.classList.add('hide');
     review.classList.add('show');
-    sendBtn.disabled = false;
+    updateSendGate();
     setStatus('', '');
     meta.textContent = '';
     bar.style.display = 'none';
@@ -683,6 +692,7 @@
     cards.classList.remove('hide');
     settingsPanel.classList.remove('hide');
     setStatus('', '');
+    updateSendGate();
     stopPlotPreview();
   }
 
@@ -715,17 +725,21 @@
       let res = {};
       try { res = JSON.parse(xhr.responseText); } catch(_) {}
       if (xhr.status >= 200 && xhr.status < 300 && res.ok) {
-        setStatus('Sent. The plotter has your photo.', 'ok');
+        if (res.processing && res.processing.calibration_required) {
+          setStatus('Processed, but not sent — calibrate both arms first.', 'err');
+        } else {
+          setStatus('Sent. The plotter has your photo.', 'ok');
+        }
         meta.textContent = `${res.filename} · ${formatBytes(res.size_bytes)}`;
         resetBtn.textContent = 'Send another photo';
         startPlotPreview(res.processing);
       } else {
-        barFill.style.width = '0%'; sendBtn.disabled = false;
+        barFill.style.width = '0%'; updateSendGate();
         setStatus(res.error || `Upload failed (HTTP ${xhr.status}).`, 'err');
       }
     });
     xhr.addEventListener('error', () => {
-      resetBtn.disabled = false; sendBtn.disabled = false; barFill.style.width = '0%';
+      resetBtn.disabled = false; barFill.style.width = '0%'; updateSendGate();
       setStatus("Could not reach the plotter. Check you're on the same Wi-Fi.", 'err');
     });
     xhr.send(form);
@@ -931,6 +945,8 @@
     const homed = pos.a_homed && pos.b_homed && pos.motor_a_deg != null && pos.motor_b_deg != null;
     calDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
       'Home both arms to see live angles');
+    machineCalibrated = !!pos.calibrated;
+    updateSendGate();
   }
 
   // ── five-bar pose diagram (shared geometry helpers) ──────────────────────────
@@ -1166,11 +1182,9 @@
     } catch (_) {}
   }
 
-  // Poll while the Calibrate tab is visible so the diagram stays live even when
-  // another client (or the hardware itself) is moving the arms.
-  setInterval(() => {
-    if (!motorTab.classList.contains('hidden')) loadPosition();
-  }, 1500);
+  // Poll regardless of the active tab so the Plot tab's send gate stays accurate
+  // even when another client (or the hardware itself) is moving the arms.
+  setInterval(loadPosition, 1500);
 
   // ── init ─────────────────────────────────────────────────────────────────────
   loadCfg();

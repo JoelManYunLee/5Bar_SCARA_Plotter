@@ -183,8 +183,16 @@ def upload():
         stats = path_stats(paths, weights)
 
         forwarded = None
+        calibration_required = False
         if PLOTTER_IP:
-            forwarded = send_to_device(paths, weights, w, h, PLOTTER_IP, PLOTTER_PORT)
+            with _position_lock:
+                calibrated = load_position()["calibrated"]
+            if calibrated:
+                forwarded = send_to_device(paths, weights, w, h, PLOTTER_IP, PLOTTER_PORT)
+            else:
+                # Arm angles are unknown until both are homed — moving blind risks a crash.
+                forwarded = False
+                calibration_required = True
 
         processing = dict(
             svg=f"/outputs/{base}.svg",
@@ -192,6 +200,7 @@ def upload():
             json=f"/outputs/{base}.json",
             stats=stats,
             forwarded=forwarded,
+            calibration_required=calibration_required,
         )
     except Exception as exc:
         processing = dict(error=str(exc))
