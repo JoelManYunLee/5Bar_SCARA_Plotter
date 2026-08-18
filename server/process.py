@@ -53,8 +53,8 @@ class Params:
     blur: int = 5               # gaussian kernel, odd; <3 disables
     canny_low: int = 0          # 0,0 => auto-threshold from median brightness
     canny_high: int = 0
-    min_length: float = 14.0   # drop strokes shorter than this (px)
-    simplify: float = 1.4      # douglas-peucker epsilon (px); 0 disables
+    min_length: float = 14.0    # drop strokes shorter than this (px)
+    simplify: float = 1.4       # douglas-peucker epsilon (px); 0 disables
     invert: bool = False        # threshold mode: trace light areas not dark
     order: bool = True          # greedy reorder to minimise pen-up travel
     order_cap: int = 3000       # skip ordering above this many strokes
@@ -66,8 +66,8 @@ class Params:
 
     # ── luminance hatching (shading / depth) ──────────────────────────────────
     shade: bool = False         # add scan-line hatching in dark / mid-tone regions
-    shade_angle: float = 45.0  # primary hatch angle (degrees)
-    shade_spacing: float = 6.0 # distance between hatch scan lines (px)
+    shade_angle: float = 45.0   # primary hatch angle (degrees)
+    shade_spacing: float = 6.0  # distance between hatch scan lines (px)
     shade_layers: int = 1       # 1 = hatch, 2 = crosshatch (+90°), etc.
     shade_dark: int = 180       # only shade pixels darker than this (0–255)
     shade_min_length: float = 8.0  # min hatch segment length (px)
@@ -400,6 +400,32 @@ def send_motor_command(motor: str, direction: str, degrees: float, ip: str,
             return {"limit": bool(info.get("limit", False))}
     except urllib.error.URLError:
         return None
+
+
+def get_device_status(ip: str, port: int = 9000, timeout: float = 3.0):
+    """GET http://<ip>:<port>/position — the firmware's live motor state.
+
+    Returns {"ready", "plotting", "a": {"homed", "deg"}, "b": {"homed", "deg"}}
+    on success, or None if the device is unreachable or replies unexpectedly.
+    """
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(f"http://{ip}:{port}/position", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status >= 400:
+                return None
+            info = json.loads(resp.read().decode())
+    except (urllib.error.URLError, ValueError, UnicodeDecodeError):
+        return None
+    if not info.get("ok"):
+        return None
+    return {
+        "ready":    bool(info.get("ready", False)),
+        "plotting": bool(info.get("plotting", False)),
+        "a": info.get("a", {}),
+        "b": info.get("b", {}),
+    }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

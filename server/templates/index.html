@@ -168,6 +168,8 @@
   .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   .btn-primary { background: var(--accent); color: #fff; margin-top: 16px; }
   .btn-primary:hover { background: var(--accent-dark); }
+  .btn-outline { background: none; color: var(--err); border: 1px solid var(--err); margin-top: 16px; }
+  .btn-outline:hover { background: rgba(216, 80, 63, .1); }
   .btn[disabled] { opacity: .5; cursor: not-allowed; }
   .link {
     background: none; border: 0; color: var(--accent); cursor: pointer;
@@ -237,6 +239,12 @@
     background: var(--dash); color: var(--ink-soft); flex-shrink: 0;
   }
   .pos-badge.cal { background: var(--badge); color: var(--accent); }
+
+  /* ── Live arm diagram ── */
+  .diagram-card {
+    background: var(--bg); border-radius: 12px; padding: 12px 14px;
+  }
+  .diagram-card svg { display: block; width: 100%; height: auto; }
 </style>
 </head>
 <body>
@@ -409,6 +417,25 @@
     <button class="btn btn-primary" id="sendBtn" type="button">Send to plotter</button>
     <button class="link" id="resetBtn" type="button">Choose a different photo</button>
     <p class="status" id="status" role="status" aria-live="polite"></p>
+
+    <!-- Live drawing preview, shown once the photo has been processed -->
+    <div class="diagram-card" id="plotPreview" style="display:none; margin-top:16px">
+      <div class="set-row" style="margin-bottom:8px">
+        <div class="set-label">Live drawing</div>
+        <span class="set-note diag-msg" id="plotPreviewNote"></span>
+      </div>
+      <svg class="arm-diagram" viewBox="0 0 280 220" role="img" aria-label="Live five-bar drawing preview">
+        <circle class="diag-baseA" r="5" fill="#6b7280"/>
+        <circle class="diag-baseB" r="5" fill="#6b7280"/>
+        <line class="diag-linkA1" stroke="#1f77b4" stroke-width="4" stroke-linecap="round" opacity="0"/>
+        <line class="diag-linkB1" stroke="#ff7f0e" stroke-width="4" stroke-linecap="round" opacity="0"/>
+        <line class="diag-linkA2" stroke="#2ca02c" stroke-width="4" stroke-linecap="round" opacity="0"/>
+        <line class="diag-linkB2" stroke="#d62728" stroke-width="4" stroke-linecap="round" opacity="0"/>
+        <polyline class="diag-trace" fill="none" stroke="#8b5cf6" stroke-width="1.5" opacity="0.7"/>
+        <circle class="diag-pen-halo" r="11" fill="#ff2d55" fill-opacity="0.35" opacity="0"/>
+        <circle class="diag-pen" r="6" fill="#ff2d55" stroke="#ffffff" stroke-width="2" opacity="0"/>
+      </svg>
+    </div>
   </div>
 
   </div><!-- /#plotTab -->
@@ -428,7 +455,26 @@
         <div><span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span> Step size</div>
       </div>
 
-      <!-- Step size -->
+      <!-- Live pose diagram -->
+      <div class="diagram-card">
+        <div class="set-row" style="margin-bottom:8px">
+          <div class="set-label">Live pose</div>
+          <span class="set-note diag-msg">Home both arms to see live angles</span>
+        </div>
+        <svg class="arm-diagram" viewBox="0 0 280 220" role="img" aria-label="Live five-bar arm pose">
+          <circle class="diag-baseA" r="5" fill="#6b7280"/>
+          <circle class="diag-baseB" r="5" fill="#6b7280"/>
+          <line class="diag-linkA1" stroke="#1f77b4" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <line class="diag-linkB1" stroke="#ff7f0e" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <line class="diag-linkA2" stroke="#2ca02c" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <line class="diag-linkB2" stroke="#d62728" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <circle class="diag-pen-halo" r="11" fill="#ff2d55" fill-opacity="0.35" opacity="0"/>
+          <circle class="diag-pen" r="6" fill="#ff2d55" stroke="#ffffff" stroke-width="2" opacity="0"/>
+        </svg>
+      </div>
+
+      <div class="settings-divider"></div>
+
       <div class="set-row">
         <div class="set-left">
           <div class="set-label">Step size</div>
@@ -498,6 +544,8 @@
         <span class="pos-badge" id="calBadge">uncalibrated</span>
       </div>
 
+      <button class="btn btn-outline" id="redoHomingBtn" type="button">Redo homing</button>
+
       <p class="status" id="motorStatus" role="status" aria-live="polite"></p>
     </div>
   </div><!-- /#motorTab -->
@@ -519,6 +567,8 @@
   const bar          = document.getElementById('bar');
   const barFill      = document.getElementById('barFill');
   const statusEl     = document.getElementById('status');
+  const plotPreview     = document.getElementById('plotPreview');
+  const plotPreviewNote = document.getElementById('plotPreviewNote');
 
   // ── settings state ──────────────────────────────────────────────────────────
   const DEFAULTS = { mode:'edges', multiscale:false, shade:false,
@@ -623,6 +673,7 @@
     meta.textContent = '';
     bar.style.display = 'none';
     barFill.style.width = '0%';
+    stopPlotPreview();
   }
 
   function reset() {
@@ -632,6 +683,7 @@
     cards.classList.remove('hide');
     settingsPanel.classList.remove('hide');
     setStatus('', '');
+    stopPlotPreview();
   }
 
   // ── upload ───────────────────────────────────────────────────────────────────
@@ -666,6 +718,7 @@
         setStatus('Sent. The plotter has your photo.', 'ok');
         meta.textContent = `${res.filename} · ${formatBytes(res.size_bytes)}`;
         resetBtn.textContent = 'Send another photo';
+        startPlotPreview(res.processing);
       } else {
         barFill.style.width = '0%'; sendBtn.disabled = false;
         setStatus(res.error || `Upload failed (HTTP ${xhr.status}).`, 'err');
@@ -687,6 +740,123 @@
     const u = ['B','KB','MB']; let i = 0;
     while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
     return b.toFixed(i ? 1 : 0) + ' ' + u[i];
+  }
+
+  // ── live drawing preview ──────────────────────────────────────────────────────
+  // Shown once a photo finishes processing. If the plotter is reachable, polls its
+  // real motor angles while it draws; otherwise animates a simulated pass through
+  // the strokes (via IK) so you can still preview the drawing without hardware.
+  let plotPreviewTimer = null;
+
+  function stopPlotPreview() {
+    if (plotPreviewTimer) { clearInterval(plotPreviewTimer); plotPreviewTimer = null; }
+    plotPreview.style.display = 'none';
+    plotDiagram.clearTrace();
+  }
+
+  async function startPlotPreview(processing) {
+    stopPlotPreview();
+    if (!processing || processing.error || !processing.json) return;
+    plotPreview.style.display = '';
+    plotPreviewNote.textContent = 'Loading strokes…';
+
+    let strokes;
+    try {
+      const res = await fetch(processing.json);
+      strokes = await res.json();
+    } catch (_) {
+      plotPreviewNote.textContent = 'Could not load stroke data for the preview.';
+      return;
+    }
+
+    if (processing.forwarded) {
+      pollLiveDrawing();
+    } else {
+      simulateDrawing(strokes);
+    }
+  }
+
+  // Polls the real plotter's motor angles (via the server's /device_status proxy)
+  // while a physical device is drawing.
+  function pollLiveDrawing() {
+    let started = false, ticks = 0;
+    plotPreviewNote.textContent = 'Waiting for the plotter to start…';
+    plotPreviewTimer = setInterval(async () => {
+      ticks++;
+      let data;
+      try {
+        const res = await fetch('/device_status');
+        data = await res.json();
+      } catch (_) {
+        data = null;
+      }
+      if (!data || !data.ok || !data.live) {
+        plotPreviewNote.textContent = 'Lost contact with the plotter.';
+        clearInterval(plotPreviewTimer); plotPreviewTimer = null;
+        return;
+      }
+      const aDeg = data.a && data.a.homed ? data.a.deg : null;
+      const bDeg = data.b && data.b.homed ? data.b.deg : null;
+      const px = plotDiagram.render(aDeg, bDeg, 'Waiting for the plotter to start…');
+      if (px) plotDiagram.addTracePoint(px[0], px[1]);
+
+      if (data.plotting) {
+        started = true;
+        plotPreviewNote.textContent = 'Drawing…';
+      } else if (started) {
+        plotPreviewNote.textContent = 'Drawing complete.';
+        clearInterval(plotPreviewTimer); plotPreviewTimer = null;
+      } else if (ticks > 25) {   // ~10s and no plot job ever appeared — give up
+        plotPreviewNote.textContent = 'Plotter finished before the preview connected.';
+        clearInterval(plotPreviewTimer); plotPreviewTimer = null;
+      }
+    }, 400);
+  }
+
+  // No physical plotter reachable — animate the pen through the strokes locally,
+  // fitting them into the drawing area and solving IK exactly as the firmware does.
+  function simulateDrawing(strokes) {
+    if (!drawArea || !geometry) {
+      plotPreviewNote.textContent = 'Drawing preview unavailable.';
+      return;
+    }
+    const { width: w, height: h, paths } = strokes;
+    if (!w || !h || !paths || !paths.length) {
+      plotPreviewNote.textContent = 'Nothing to draw.';
+      return;
+    }
+    const scale = Math.min(drawArea.w / w, drawArea.h / h);
+    const flat = [];
+    for (const path of paths) {
+      for (const [ix, iy] of path) {
+        flat.push([
+          drawArea.cx + (ix - w / 2) * scale,
+          drawArea.cy - (iy - h / 2) * scale,
+        ]);
+      }
+    }
+    if (!flat.length) {
+      plotPreviewNote.textContent = 'Nothing to draw.';
+      return;
+    }
+
+    plotPreviewNote.textContent = 'Simulating the drawing (no plotter connected)…';
+    const step = Math.max(1, Math.ceil(flat.length / 500));  // ~500 ticks regardless of detail
+    let i = 0;
+    plotPreviewTimer = setInterval(() => {
+      if (i >= flat.length) {
+        plotPreviewNote.textContent = 'Simulated drawing complete.';
+        clearInterval(plotPreviewTimer); plotPreviewTimer = null;
+        return;
+      }
+      const [x, y] = flat[i];
+      const ik = inverseKinematics(x, y, geometry.base, geometry.proximal, geometry.distal);
+      if (ik) {
+        const px = plotDiagram.render(ik.thA, ik.thB, '');
+        if (px) plotDiagram.addTracePoint(px[0], px[1]);
+      }
+      i += step;
+    }, 20);
   }
 
   // ── tab switching ────────────────────────────────────────────────────────────
@@ -711,6 +881,7 @@
   const calBadge    = document.getElementById('calBadge');
   const badgeA      = document.getElementById('badgeA');
   const badgeB      = document.getElementById('badgeB');
+  const redoHomingBtn = document.getElementById('redoHomingBtn');
   const stepBtns = { 1: document.getElementById('stepSmall'),
                      5: document.getElementById('stepMedium'),
                      15: document.getElementById('stepLarge') };
@@ -757,7 +928,144 @@
     setBadge(badgeB, pos.b_homed);
     calBadge.textContent = pos.calibrated ? 'calibrated' : 'uncalibrated';
     calBadge.classList.toggle('cal', !!pos.calibrated);
+    const homed = pos.a_homed && pos.b_homed && pos.motor_a_deg != null && pos.motor_b_deg != null;
+    calDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
+      'Home both arms to see live angles');
   }
+
+  // ── five-bar pose diagram (shared geometry helpers) ──────────────────────────
+  // Mirrors the geometry in sim/simulator.py's FiveBar.forward()/inverse() and the
+  // firmware's forward/inverse_kinematics(), so the drawn pose matches the real arm.
+  let geometry = null;                    // {base, proximal, distal}, cached from /position
+  let drawArea = null;                    // {cx, cy, w, h}, cached from /position
+  const DIAG_W = 280, DIAG_H = 220, DIAG_PAD = 18;
+
+  function circleIntersections(c0, r0, c1, r1) {
+    const [x0, y0] = c0, [x1, y1] = c1;
+    const dx = x1 - x0, dy = y1 - y0;
+    const d = Math.hypot(dx, dy);
+    if (d === 0 || d > r0 + r1 + 1e-9 || d < Math.abs(r0 - r1) - 1e-9) return [];
+    const a = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+    const h = Math.sqrt(Math.max(r0 * r0 - a * a, 0));
+    const xm = x0 + a * dx / d, ym = y0 + a * dy / d;
+    const ux = -dy / d, uy = dx / d;
+    return [[xm + h * ux, ym + h * uy], [xm - h * ux, ym - h * uy]];
+  }
+
+  // Angles (deg, CCW from +X at each base) -> {a, b, e1, e2, pen}, or null if unreachable.
+  function fiveBarPose(thetaADeg, thetaBDeg, d, l1, l2) {
+    const a = [-d / 2, 0], b = [d / 2, 0];
+    const ta = thetaADeg * Math.PI / 180, tb = thetaBDeg * Math.PI / 180;
+    const e1 = [a[0] + l1 * Math.cos(ta), a[1] + l1 * Math.sin(ta)];
+    const e2 = [b[0] + l1 * Math.cos(tb), b[1] + l1 * Math.sin(tb)];
+    const pts = circleIntersections(e1, l2, e2, l2);
+    if (!pts.length) return null;
+    const pen = pts[0][1] >= pts[1][1] ? pts[0] : pts[1];   // upper solution: pen reaches past the elbows toward the draw area
+    return { a, b, e1, e2, pen };
+  }
+
+  // Pen (x, y) -> {thA, thB} motor angles (deg), or null if unreachable. Picks the
+  // outward elbow branch (left elbow left, right elbow right), matching the firmware.
+  function inverseKinematics(px, py, d, l1, l2) {
+    const a = [-d / 2, 0], b = [d / 2, 0];
+    const left = circleIntersections(a, l1, [px, py], l2);
+    const right = circleIntersections(b, l1, [px, py], l2);
+    if (!left.length || !right.length) return null;
+    let e1 = left[0];
+    if (left.length === 2 && left[1][0] < e1[0]) e1 = left[1];
+    let e2 = right[0];
+    if (right.length === 2 && right[1][0] > e2[0]) e2 = right[1];
+    return {
+      thA: Math.atan2(e1[1] - a[1], e1[0] - a[0]) * 180 / Math.PI,
+      thB: Math.atan2(e2[1] - b[1], e2[0] - b[0]) * 180 / Math.PI,
+    };
+  }
+
+  // Robot-space (x, y) -> SVG pixel coords, fit to the diagram's fixed viewBox.
+  function diagramTransform(d, l1, l2) {
+    const maxReach = l1 + l2;
+    const xMin = -(d / 2 + maxReach), xMax = d / 2 + maxReach;
+    const yMin = -maxReach * 0.15, yMax = maxReach * 1.05;
+    const scale = Math.min(
+      (DIAG_W - 2 * DIAG_PAD) / (xMax - xMin),
+      (DIAG_H - 2 * DIAG_PAD) / (yMax - yMin)
+    );
+    return (x, y) => [
+      (x - xMin) * scale + DIAG_PAD,
+      DIAG_H - DIAG_PAD - (y - yMin) * scale,
+    ];
+  }
+
+  // Binds a renderer to one <svg class="arm-diagram"> instance, so the Calibrate
+  // tab and the Plot tab's drawing preview can each keep their own pose on screen.
+  function createArmDiagram(svgEl) {
+    const msgEl  = svgEl.parentElement.querySelector('.diag-msg');
+    const baseA  = svgEl.querySelector('.diag-baseA');
+    const baseB  = svgEl.querySelector('.diag-baseB');
+    const linkA1 = svgEl.querySelector('.diag-linkA1');
+    const linkB1 = svgEl.querySelector('.diag-linkB1');
+    const linkA2 = svgEl.querySelector('.diag-linkA2');
+    const linkB2 = svgEl.querySelector('.diag-linkB2');
+    const pen     = svgEl.querySelector('.diag-pen');
+    const penHalo = svgEl.querySelector('.diag-pen-halo');
+    const trace   = svgEl.querySelector('.diag-trace');
+    const armEls  = [linkA1, linkB1, linkA2, linkB2, pen, penHalo];
+
+    function setLine(el, x1, y1, x2, y2) {
+      el.setAttribute('x1', x1); el.setAttribute('y1', y1);
+      el.setAttribute('x2', x2); el.setAttribute('y2', y2);
+    }
+    function setVisible(v) {
+      armEls.forEach(el => el.setAttribute('opacity', v ? '1' : '0'));
+    }
+
+    // thetaADeg/thetaBDeg null => pose unknown; shows unreachableMsg in that case.
+    function render(thetaADeg, thetaBDeg, unreachableMsg) {
+      if (!geometry) return null;
+      const { base: d, proximal: l1, distal: l2 } = geometry;
+      const toPx = diagramTransform(d, l1, l2);
+      const [ax, ay] = toPx(-d / 2, 0), [bx, by] = toPx(d / 2, 0);
+      baseA.setAttribute('cx', ax); baseA.setAttribute('cy', ay);
+      baseB.setAttribute('cx', bx); baseB.setAttribute('cy', by);
+
+      if (thetaADeg == null || thetaBDeg == null) {
+        if (msgEl) msgEl.textContent = unreachableMsg || '';
+        setVisible(false);
+        return null;
+      }
+      const pose = fiveBarPose(thetaADeg, thetaBDeg, d, l1, l2);
+      if (!pose) {
+        if (msgEl) msgEl.textContent = 'Pose unreachable with current geometry';
+        setVisible(false);
+        return null;
+      }
+      if (msgEl) msgEl.textContent = '';
+      const [e1x, e1y] = toPx(...pose.e1), [e2x, e2y] = toPx(...pose.e2);
+      const [px, py] = toPx(...pose.pen);
+      setLine(linkA1, ax, ay, e1x, e1y);
+      setLine(linkB1, bx, by, e2x, e2y);
+      setLine(linkA2, e1x, e1y, px, py);
+      setLine(linkB2, e2x, e2y, px, py);
+      pen.setAttribute('cx', px); pen.setAttribute('cy', py);
+      penHalo.setAttribute('cx', px); penHalo.setAttribute('cy', py);
+      setVisible(true);
+      return [px, py];
+    }
+
+    function addTracePoint(px, py) {
+      if (!trace) return;
+      const pts = trace.getAttribute('points');
+      trace.setAttribute('points', pts ? `${pts} ${px},${py}` : `${px},${py}`);
+    }
+    function clearTrace() {
+      if (trace) trace.setAttribute('points', '');
+    }
+
+    return { render, addTracePoint, clearTrace };
+  }
+
+  const calDiagram  = createArmDiagram(document.querySelector('#motorTab .arm-diagram'));
+  const plotDiagram = createArmDiagram(document.querySelector('#plotPreview .arm-diagram'));
 
   async function jog(motor, direction) {
     if (jogBusy) return;                       // one move at a time — avoids key-repeat floods
@@ -793,6 +1101,29 @@
     }
   }
 
+  redoHomingBtn.addEventListener('click', async () => {
+    if (jogBusy) return;
+    if (!confirm('Redo homing? Both arms will be marked unhomed until you jog them into their limit switches again.')) return;
+    jogBusy = true;
+    redoHomingBtn.disabled = true;
+    setMotorStatus('Resetting homing…', '');
+    try {
+      const res = await fetch('/reset_homing', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        renderPosition(data.position);
+        setMotorStatus('Homing reset — jog each arm to its limit switch to re-home.', 'ok');
+      } else {
+        setMotorStatus(data.error || `Reset failed (HTTP ${res.status}).`, 'err');
+      }
+    } catch (_) {
+      setMotorStatus("Could not reach the plotter. Check you're on the same Wi-Fi.", 'err');
+    } finally {
+      redoHomingBtn.disabled = false;
+      jogBusy = false;
+    }
+  });
+
   // keyboard jog — active only while the Calibrate tab is visible
   const keyMap = {
     ArrowLeft: ['A', 'ccw'], ArrowRight: ['A', 'cw'],
@@ -827,9 +1158,19 @@
     try {
       const res = await fetch('/position');
       const data = await res.json();
-      if (data.ok) renderPosition(data.position);
+      if (data.ok) {
+        if (data.geometry) geometry = data.geometry;
+        if (data.draw_area) drawArea = data.draw_area;
+        renderPosition(data.position);
+      }
     } catch (_) {}
   }
+
+  // Poll while the Calibrate tab is visible so the diagram stays live even when
+  // another client (or the hardware itself) is moving the arms.
+  setInterval(() => {
+    if (!motorTab.classList.contains('hidden')) loadPosition();
+  }, 1500);
 
   // ── init ─────────────────────────────────────────────────────────────────────
   loadCfg();

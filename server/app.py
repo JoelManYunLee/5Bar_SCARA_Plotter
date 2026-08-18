@@ -30,7 +30,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
-from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command
+from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command, get_device_status
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 OUTPUTS_FOLDER = os.path.join(BASE_DIR, "outputs")
@@ -46,6 +46,25 @@ PLOTTER_PORT = int(os.environ.get("PLOTTER_PORT", "9000"))
 # tracking begins from there.
 LIMIT_A_DEG = float(os.environ.get("LIMIT_A_DEG", "90"))
 LIMIT_B_DEG = float(os.environ.get("LIMIT_B_DEG", "90"))
+
+# Five-bar link lengths (robot units), mirroring LINK_BASE/LINK_PROX/LINK_DIST in
+# firmware/plotter_server/plotter_server.ino. Sent to the browser so it can draw
+# the live pose from the tracked motor angles.
+ARM_GEOMETRY = {
+    "base":     float(os.environ.get("ARM_BASE", "10.0")),
+    "proximal": float(os.environ.get("ARM_PROXIMAL", "12.0")),
+    "distal":   float(os.environ.get("ARM_DISTAL", "15.0")),
+}
+
+# Rectangle (robot units) each photo is fitted into, mirroring DRAW_CX/CY/W/H in
+# the firmware. Sent to the browser so it can reproduce the same fit + IK for a
+# simulated drawing preview when no physical plotter is connected.
+DRAW_AREA = {
+    "cx": float(os.environ.get("DRAW_CX", "0.0")),
+    "cy": float(os.environ.get("DRAW_CY", "7.0")),
+    "w":  float(os.environ.get("DRAW_W", "8.0")),
+    "h":  float(os.environ.get("DRAW_H", "6.0")),
+}
 
 # Overridden to True by --sim at startup; False when running on real hardware.
 SIM_MODE = False
@@ -219,7 +238,9 @@ def motor():
 
     # A limit hit fixes the arm's known angle and starts tracking. Before that the
     # angle is unknown; only an already-homed arm accumulates the jog.
-    delta = degrees if direction == "cw" else -degrees
+    # CCW increases the tracked angle, matching jog_arm() in the firmware and the
+    # CCW-positive convention the forward-kinematics diagram assumes.
+    delta = degrees if direction == "ccw" else -degrees
     with _position_lock:
         pos = load_position()
         if motor_id == "A":
@@ -239,9 +260,39 @@ def motor():
 
 @app.route("/position")
 def position():
-    """Return the last known motor position and calibration state."""
+    """Return the last known motor position, calibration state, and arm geometry."""
     with _position_lock:
-        return jsonify(ok=True, position=load_position())
+        return jsonify(ok=True, position=load_position(), geometry=ARM_GEOMETRY, draw_area=DRAW_AREA)
+
+
+@app.route("/reset_homing", methods=["POST"])
+def reset_homing():
+    """Clear both arms' homed state so calibration must be redone from scratch."""
+    with _position_lock:
+        pos = load_position()
+        pos["a_homed"] = False
+        pos["b_homed"] = False
+        pos["motor_a_deg"] = None
+        pos["motor_b_deg"] = None
+        pos = save_position(pos)
+    return jsonify(ok=True, position=pos)
+
+
+@app.route("/device_status")
+def device_status():
+    """Proxy the plotter firmware's live /position while it's drawing.
+
+    Unlike /position above (which reflects our own jog-tracked state), this hits
+    the device directly so the browser can show real motor angles while a photo
+    is being plotted. Returns live=False when no device is configured/reachable,
+    so the caller can fall back to a simulated preview.
+    """
+    if not PLOTTER_IP:
+        return jsonify(ok=True, live=False)
+    status = get_device_status(PLOTTER_IP, PLOTTER_PORT)
+    if status is None:
+        return jsonify(ok=True, live=False)
+    return jsonify(ok=True, live=True, **status)
 
 
 @app.route("/uploads/<path:filename>")
