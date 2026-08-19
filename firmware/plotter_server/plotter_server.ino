@@ -40,8 +40,8 @@
 #include <math.h>
 
 // ── Network ────────────────────────────────────────────────────────────────────
-static const char*    WIFI_SSID = "YOUR_WIFI_SSID";
-static const char*    WIFI_PASS = "YOUR_WIFI_PASSWORD";
+static const char*    WIFI_SSID = "lion";
+static const char*    WIFI_PASS = "shawn429";
 static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the server
 
 // ── Drivetrain (TB6600 @ 1/4 microstep, 32:1 harmonic gearbox) ─────────────────
@@ -54,13 +54,13 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 
 // Known output-shaft angle where each arm's limit switch engages. Must match
 // LIMIT_A_DEG / LIMIT_B_DEG on the server so hardware and server agree on zero.
-#define LIMIT_A_DEG   90.0f
-#define LIMIT_B_DEG   90.0f
+#define LIMIT_A_DEG   270.0f
+#define LIMIT_B_DEG   -90.0f
 
 // ── Five-bar geometry (mirrors sim/simulator.py and ik_test.ino) ───────────────
-#define LINK_BASE   8.0f    // distance between the two motor shafts
-#define LINK_PROX   6.0f    // proximal link, motor → elbow
-#define LINK_DIST   9.0f    // distal link,  elbow → pen
+#define LINK_BASE   10.0f    // distance between the two motor shafts
+#define LINK_PROX   13.0f    // proximal link, motor → elbow
+#define LINK_DIST   15.0f    // distal link,  elbow → pen
 
 // Ready pose struck once both arms are homed: each proximal link 45° above the
 // horizontal, symmetric about +Y (left arm 135°, right arm 45°, CCW from +X).
@@ -75,17 +75,17 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 #define DIR_B   (+1)
 
 // ── Pin map (STEP/DIR/ENABLE to TB6600, plus a limit switch per arm) ───────────
-#define A_STEP_PIN   25
-#define A_DIR_PIN    26
+#define A_STEP_PIN   32
+#define A_DIR_PIN    33
 #define A_EN_PIN     27
-#define B_STEP_PIN   32
-#define B_DIR_PIN    33
+#define B_STEP_PIN   2
+#define B_DIR_PIN    4
 #define B_EN_PIN     14
 #define DRIVER_ENABLE_ACTIVE_LOW   1
 
 // Switches wired between the pin and GND; internal pull-ups → LOW when pressed.
-#define A_LIMIT_PIN  21
-#define B_LIMIT_PIN  22
+#define A_LIMIT_PIN  25
+#define B_LIMIT_PIN  26
 #define LIMIT_ACTIVE_LOW   1
 
 // ── Jog motion profile ─────────────────────────────────────────────────────────
@@ -347,35 +347,79 @@ static void send_json(int code, const String& body) {
 }
 
 static void handle_motor() {
-  if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
-  if (job.active)                  { send_json(409, "{\"ok\":false,\"error\":\"busy — plotting\"}"); return; }
+  Serial.println("[HTTP] /motor request received");
+
+  if (server.method() != HTTP_POST) {
+    send_json(405, "{\"ok\":false,\"error\":\"POST only\"}");
+    return;
+  }
+
+  if (job.active) {
+    send_json(409, "{\"ok\":false,\"error\":\"busy — plotting\"}");
+    return;
+  }
 
   StaticJsonDocument<192> doc;
-  if (deserializeJson(doc, server.arg("plain"))) {
+
+  String raw = server.arg("plain");
+  Serial.printf("[HTTP] body: %s\n", raw.c_str());
+
+  if (deserializeJson(doc, raw)) {
+    Serial.println("[HTTP] ERROR: bad JSON");
     send_json(400, "{\"ok\":false,\"error\":\"bad JSON\"}");
     return;
   }
 
   String motor = doc["motor"] | "";
   String dir   = doc["direction"] | "";
-  float  deg   = doc["degrees"] | 0.0f;
+  float deg    = doc["degrees"] | 0.0f;
+
   motor.toUpperCase();
   dir.toLowerCase();
 
-  Arm* arm = (motor == "A") ? &armA : (motor == "B") ? &armB : nullptr;
-  if (!arm)                        { send_json(400, "{\"ok\":false,\"error\":\"motor must be A or B\"}"); return; }
-  if (dir != "cw" && dir != "ccw"){ send_json(400, "{\"ok\":false,\"error\":\"direction must be cw or ccw\"}"); return; }
-  if (deg <= 0 || deg > 360)      { send_json(400, "{\"ok\":false,\"error\":\"degrees out of range\"}"); return; }
+  Serial.printf(
+      "[motor] motor=%s direction=%s degrees=%.2f\n",
+      motor.c_str(),
+      dir.c_str(),
+      deg
+  );
+
+  Arm* arm =
+      (motor == "A") ? &armA :
+      (motor == "B") ? &armB :
+                       nullptr;
+
+  if (!arm) {
+    send_json(400, "{\"ok\":false,\"error\":\"motor must be A or B\"}");
+    return;
+  }
 
   bool wasCalibrated = armA.homed && armB.homed;
-  bool hit = jog_arm(*arm, dir, deg);
-  if (!wasCalibrated && armA.homed && armB.homed) pendingReady = true;  // ready move runs in loop()
 
-  String posStr = arm->homed ? String(arm_position_deg(*arm), 3) : String("null");
-  String body = String("{\"ok\":true,\"motor\":\"") + motor +
-                "\",\"limit\":" + (hit ? "true" : "false") +
-                ",\"homed\":" + (arm->homed ? "true" : "false") +
-                ",\"position_deg\":" + posStr + "}";
+  Serial.printf("[motor] starting jog. limit currently=%d\n",
+                limit_pressed(*arm));
+
+  bool hit = jog_arm(*arm, dir, deg);
+
+  Serial.printf(
+      "[motor] jog finished hit=%d homed=%d position=%.2f\n",
+      hit,
+      arm->homed,
+      arm_position_deg(*arm)
+  );
+
+  if (!wasCalibrated && armA.homed && armB.homed)
+    pendingReady = true;
+
+  String posStr =
+      arm->homed ? String(arm_position_deg(*arm), 3) : String("null");
+
+  String body =
+      String("{\"ok\":true,\"motor\":\"") + motor +
+      "\",\"limit\":" + (hit ? "true" : "false") +
+      ",\"homed\":" + (arm->homed ? "true" : "false") +
+      ",\"position_deg\":" + posStr + "}";
+
   send_json(200, body);
 }
 
