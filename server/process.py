@@ -405,7 +405,7 @@ def send_motor_command(motor: str, direction: str, degrees: float, ip: str,
 def get_device_status(ip: str, port: int = 9000, timeout: float = 3.0):
     """GET http://<ip>:<port>/position — the firmware's live motor state.
 
-    Returns {"ready", "plotting", "a": {"homed", "deg"}, "b": {"homed", "deg"}}
+    Returns {"ready", "plotting", "moving", "a": {"homed", "deg"}, "b": {"homed", "deg"}}
     on success, or None if the device is unreachable or replies unexpectedly.
     """
     import urllib.request
@@ -423,6 +423,7 @@ def get_device_status(ip: str, port: int = 9000, timeout: float = 3.0):
     return {
         "ready":    bool(info.get("ready", False)),
         "plotting": bool(info.get("plotting", False)),
+        "moving":   bool(info.get("moving", False)),
         "a": info.get("a", {}),
         "b": info.get("b", {}),
     }

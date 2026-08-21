@@ -8,8 +8,9 @@
  * power cycles via NVS, so the machine stays calibrated between sessions.
  *
  * Once both arms are homed, the firmware solves forward kinematics for the pen
- * position, moves to a symmetric 45°-above-horizontal ready pose, and from there
- * begins accepting /plot stroke instructions from the server.
+ * position, then automatically travels (pen up) to the drawing rectangle's
+ * bottom-left corner (0,0) — asynchronously, so /position keeps reporting live
+ * angles the whole way — and begins accepting /plot from there.
  *
  *   POST /motor   {motor:"A"|"B", direction:"cw"|"ccw", degrees:<n>}
  *                 → jog; stop early if the switch engages
@@ -17,7 +18,7 @@
  *   POST /plot    {width,height,paths,weights}  (only after both arms homed)
  *                 → fit into the drawing area, run IK, stream strokes with pen lift
  *                 ← {ok:true, accepted:{paths,points}}  (202; drawing runs async)
- *   GET  /position → {ok:true, ready:<bool>, plotting:<bool>, a:{homed,deg}, b:{homed,deg}}
+ *   GET  /position → {ok:true, ready:<bool>, plotting:<bool>, moving:<bool>, a:{homed,deg}, b:{homed,deg}}
  *   GET  /         → health text
  *
  * Drivetrain: NEMA-17 (200 full steps) → TB6600 @ 1/4 microstep → 32:1 harmonic.
@@ -121,9 +122,10 @@ Preferences  prefs;
 Servo        penServo;
 
 // Calibration / plotting state.
-static bool atReady      = false;  // reached the 45° ready pose, accepting /plot
-static bool pendingReady = false;  // both arms just homed → run the ready move
+static bool atReady      = false;  // both arms homed, accepting /plot (no fixed pose required)
+static bool pendingReady = false;  // both arms just homed → report pose, arm /plot
 static bool penDown      = false;
+static bool travelActive = false;  // auto-parking at (0,0) after calibration, driven from loop() so /position stays live
 
 // A drawing job, filled by /plot and executed one point per loop() so the HTTP
 // server stays responsive while the strokes stream out.
@@ -264,18 +266,29 @@ static void move_to_angles(float thetaA_deg, float thetaB_deg) {
   persist(armB);
 }
 
-// Both arms just homed: report the pen position, then settle into the ready pose.
+// Both arms just homed: report the pen position, then auto-travel (pen up) to
+// the drawing rectangle's origin (0,0), asynchronously — travel_step() drives
+// it from loop() so /position keeps reporting live angles the whole way.
 static void go_ready() {
   float x, y;
   if (forward_kinematics(arm_position_deg(armA), arm_position_deg(armB), &x, &y))
     Serial.printf("[fk] homed pen position = (%.2f, %.2f)\n", x, y);
 
-  Serial.printf("[ready] moving to 45° pose (A=%.0f°, B=%.0f°)\n", READY_A_DEG, READY_B_DEG);
-  move_to_angles(READY_A_DEG, READY_B_DEG);
+  float targetX = DRAW_CX - DRAW_W / 2.0f;
+  float targetY = DRAW_CY - DRAW_H / 2.0f;
+  float ta, tb;
+  if (!inverse_kinematics(targetX, targetY, &ta, &tb)) {
+    Serial.println("[goto] origin (0,0) unreachable — staying at the homed pose");
+    return;
+  }
 
-  if (forward_kinematics(READY_A_DEG, READY_B_DEG, &x, &y))
-    Serial.printf("[ready] pen at ready pose = (%.2f, %.2f)\n", x, y);
-  Serial.println("[plot] calibrated and ready — POST /plot to draw");
+  if (penDown) pen_up();
+  motorA.setMaxSpeed(DRAW_MAX_SPEED); motorA.setAcceleration(DRAW_ACCEL);
+  motorB.setMaxSpeed(DRAW_MAX_SPEED); motorB.setAcceleration(DRAW_ACCEL);
+  motorA.moveTo(lroundf(degrees(ta) * STEPS_PER_DEG));
+  motorB.moveTo(lroundf(degrees(tb) * STEPS_PER_DEG));
+  travelActive = true;                                 // travel_step() takes it from here
+  Serial.println("[goto] auto-parking at (0,0)");
 }
 
 // ── Pen + plotting ──────────────────────────────────────────────────────────────
@@ -340,6 +353,20 @@ static void plot_step() {
   }
 }
 
+// Drives the post-calibration auto-travel to (0,0) one AccelStepper tick at a
+// time from loop(), instead of blocking, so /position keeps reporting live angles.
+static void travel_step() {
+  motorA.run();
+  motorB.run();
+  if (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) return;
+
+  motorA.setMaxSpeed(JOG_MAX_SPEED); motorA.setAcceleration(JOG_ACCEL);
+  motorB.setMaxSpeed(JOG_MAX_SPEED); motorB.setAcceleration(JOG_ACCEL);
+  persist(armA); persist(armB);
+  travelActive = false;
+  Serial.println("[goto] parked at (0,0)");
+}
+
 // ── HTTP handlers ──────────────────────────────────────────────────────────────
 
 static void send_json(int code, const String& body) {
@@ -356,6 +383,10 @@ static void handle_motor() {
 
   if (job.active) {
     send_json(409, "{\"ok\":false,\"error\":\"busy — plotting\"}");
+    return;
+  }
+  if (travelActive) {
+    send_json(409, "{\"ok\":false,\"error\":\"busy — auto-parking at (0,0)\"}");
     return;
   }
 
@@ -428,6 +459,7 @@ static void handle_position() {
   String bPos = armB.homed ? String(arm_position_deg(armB), 3) : String("null");
   String body = String("{\"ok\":true,\"ready\":") + (atReady ? "true" : "false") +
                 ",\"plotting\":" + (job.active ? "true" : "false") +
+                ",\"moving\":" + (travelActive ? "true" : "false") +
                 ",\"a\":{\"homed\":" + (armA.homed ? "true" : "false") +
                 ",\"deg\":" + aPos + "},\"b\":{\"homed\":" + (armB.homed ? "true" : "false") +
                 ",\"deg\":" + bPos + "}}";
@@ -438,6 +470,7 @@ static void handle_plot() {
   if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
   if (!atReady)   { send_json(409, "{\"ok\":false,\"error\":\"not ready — home both arms first\"}"); return; }
   if (job.active) { send_json(409, "{\"ok\":false,\"error\":\"busy — a plot is already running\"}"); return; }
+  if (travelActive) { send_json(409, "{\"ok\":false,\"error\":\"busy — auto-parking at (0,0)\"}"); return; }
 
   // The stroke JSON can be large; size the parser from the biggest free block.
   DynamicJsonDocument doc((ESP.getMaxAllocHeap() * 3) / 4);
@@ -541,10 +574,11 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  if (pendingReady) {           // both arms just homed → FK + move to 45° ready pose
+  if (pendingReady) {           // both arms just homed → report pose, kick off auto-travel to (0,0)
     pendingReady = false;
     go_ready();
     atReady = true;
   }
-  if (job.active) plot_step();  // stream the current drawing, one point per loop
+  if (job.active)    plot_step();    // stream the current drawing, one point per loop
+  if (travelActive)  travel_step();  // drive the auto-park-at-origin move, one tick per loop
 }

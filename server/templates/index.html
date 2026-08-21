@@ -482,9 +482,9 @@
           <div class="set-note">Degrees of output-shaft rotation per press</div>
         </div>
         <div class="seg" role="group" aria-label="Step size">
-          <button class="seg-btn"        id="stepSmall"  type="button">1°</button>
-          <button class="seg-btn active" id="stepMedium" type="button">5°</button>
-          <button class="seg-btn"        id="stepLarge"  type="button">15°</button>
+          <button class="seg-btn"        id="stepSmall"  type="button">5°</button>
+          <button class="seg-btn active" id="stepMedium" type="button">10°</button>
+          <button class="seg-btn"        id="stepLarge"  type="button">30°</button>
         </div>
       </div>
 
@@ -543,6 +543,16 @@
           <div class="set-note" id="posReadout">Motor A 0.0° · Motor B 0.0°</div>
         </div>
         <span class="pos-badge" id="calBadge">uncalibrated</span>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <!-- Drawing area, shown once both arms are homed -->
+      <div class="set-row">
+        <div class="set-left">
+          <div class="set-label">Drawing area</div>
+          <div class="set-note" id="drawAreaNote">Calibrate both arms to see the drawing area</div>
+        </div>
       </div>
 
       <button class="btn btn-outline" id="redoHomingBtn" type="button">Redo homing</button>
@@ -896,10 +906,11 @@
   const badgeA      = document.getElementById('badgeA');
   const badgeB      = document.getElementById('badgeB');
   const redoHomingBtn = document.getElementById('redoHomingBtn');
-  const stepBtns = { 1: document.getElementById('stepSmall'),
-                     5: document.getElementById('stepMedium'),
-                     15: document.getElementById('stepLarge') };
-  let motorStep = 5;
+  const drawAreaNote  = document.getElementById('drawAreaNote');
+  const stepBtns = { 5: document.getElementById('stepSmall'),
+                     10: document.getElementById('stepMedium'),
+                     30: document.getElementById('stepLarge') };
+  let motorStep = 10;
   let jogBusy = false;
 
   function applyStepUI() {
@@ -947,6 +958,12 @@
       'Home both arms to see live angles');
     machineCalibrated = !!pos.calibrated;
     updateSendGate();
+
+    if (drawArea && machineCalibrated) {
+      drawAreaNote.textContent = `${drawArea.w.toFixed(1)} × ${drawArea.h.toFixed(1)} units — (0,0) is the bottom-left corner`;
+    } else {
+      drawAreaNote.textContent = 'Calibrate both arms to see the drawing area';
+    }
   }
 
   // ── five-bar pose diagram (shared geometry helpers) ──────────────────────────
@@ -1087,6 +1104,7 @@
     if (jogBusy) return;                       // one move at a time — avoids key-repeat floods
     jogBusy = true;
     jogBtns.forEach(b => b.disabled = true);
+    const wasCalibrated = machineCalibrated;
     setMotorStatus(`Motor ${motor} ${direction.toUpperCase()} ${motorStep}°…`, '');
     try {
       const res = await fetch('/motor', {
@@ -1099,6 +1117,13 @@
         renderPosition(data.position);
         if (data.limit) {
           setMotorStatus(`Arm ${motor} hit its limit switch — homed at its known angle.`, 'ok');
+          if (!wasCalibrated && machineCalibrated) {
+            // Both arms just homed — the firmware auto-parks at (0,0); watch it travel there.
+            setMotorStatus('Both arms homed — parking at (0,0)…', 'ok');
+            await pollAutoTravel();
+            setMotorStatus('Parked at (0,0), the drawing area\'s bottom-left corner.', 'ok');
+            loadPosition();
+          }
         } else {
           setMotorStatus(
             data.forwarded === false
@@ -1115,6 +1140,30 @@
       jogBtns.forEach(b => b.disabled = false);
       jogBusy = false;
     }
+  }
+
+  // Polls /device_status while the firmware auto-travels to (0,0) right after
+  // calibration completes, so the live pose diagram tracks the arms in real
+  // time instead of jumping straight to the final pose.
+  function pollAutoTravel() {
+    return new Promise(resolve => {
+      let ticks = 0;
+      const timer = setInterval(async () => {
+        ticks++;
+        let data;
+        try {
+          const res = await fetch('/device_status');
+          data = await res.json();
+        } catch (_) {
+          data = null;
+        }
+        if (!data || !data.ok || !data.live) { clearInterval(timer); resolve(); return; }
+        const aDeg = data.a && data.a.homed ? data.a.deg : null;
+        const bDeg = data.b && data.b.homed ? data.b.deg : null;
+        calDiagram.render(aDeg, bDeg, 'Home both arms to see live angles');
+        if (!data.moving || ticks > 100) { clearInterval(timer); resolve(); }  // ~20s safety cap
+      }, 200);
+    });
   }
 
   redoHomingBtn.addEventListener('click', async () => {
@@ -1151,7 +1200,7 @@
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
 
     if (e.key === '1' || e.key === '2' || e.key === '3') {
-      motorStep = { '1': 1, '2': 5, '3': 15 }[e.key];
+      motorStep = { '1': 5, '2': 10, '3': 30 }[e.key];
       applyStepUI();
       e.preventDefault();
       return;
