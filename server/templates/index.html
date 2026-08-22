@@ -1056,17 +1056,27 @@
     return { a, b, e1, e2, pen };
   }
 
-  // Pen (x, y) -> {thA, thB} motor angles (deg), or null if unreachable. Picks the
-  // outward elbow branch (left elbow left, right elbow right), matching the firmware.
+  // Pen (x, y) -> {thA, thB} motor angles (deg), or null if unreachable. When a
+  // side has two solutions, prefers the elbow at/above the base line (y >= 0) —
+  // the other branch folds back under the frame — else falls back to the
+  // outward x-based pick, matching the firmware.
   function inverseKinematics(px, py, d, l1, l2) {
     const a = [-d / 2, 0], b = [d / 2, 0];
     const left = circleIntersections(a, l1, [px, py], l2);
     const right = circleIntersections(b, l1, [px, py], l2);
     if (!left.length || !right.length) return null;
     let e1 = left[0];
-    if (left.length === 2 && left[1][0] < e1[0]) e1 = left[1];
+    if (left.length === 2) {
+      const above0 = left[0][1] >= 0, above1 = left[1][1] >= 0;
+      if (above1 && !above0) e1 = left[1];
+      else if (above0 === above1 && left[1][0] < e1[0]) e1 = left[1];
+    }
     let e2 = right[0];
-    if (right.length === 2 && right[1][0] > e2[0]) e2 = right[1];
+    if (right.length === 2) {
+      const above0 = right[0][1] >= 0, above1 = right[1][1] >= 0;
+      if (above1 && !above0) e2 = right[1];
+      else if (above0 === above1 && right[1][0] > e2[0]) e2 = right[1];
+    }
     return {
       thA: Math.atan2(e1[1] - a[1], e1[0] - a[0]) * 180 / Math.PI,
       thB: Math.atan2(e2[1] - b[1], e2[0] - b[0]) * 180 / Math.PI,
