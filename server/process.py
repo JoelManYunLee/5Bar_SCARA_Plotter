@@ -402,6 +402,26 @@ def send_motor_command(motor: str, direction: str, degrees: float, ip: str,
         return None
 
 
+def send_home_command(ip: str, port: int = 9000, timeout: float = 5.0):
+    """Tell the plotter to travel (pen up) to the drawing area's (0,0) corner.
+
+    POSTs to http://<ip>:<port>/home. Only accepted once both arms are homed;
+    the move itself runs asynchronously on the device. Returns True on success,
+    False if the device rejected the request (e.g. not homed or already busy),
+    or None if the device is unreachable.
+    """
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(f"http://{ip}:{port}/home", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status < 400
+    except urllib.error.HTTPError:
+        return False
+    except urllib.error.URLError:
+        return None
+
+
 def get_device_status(ip: str, port: int = 9000, timeout: float = 3.0):
     """GET http://<ip>:<port>/position — the firmware's live motor state.
 

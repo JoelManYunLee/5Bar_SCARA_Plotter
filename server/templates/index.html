@@ -555,6 +555,7 @@
         </div>
       </div>
 
+      <button class="btn btn-primary" id="goHomeBtn" type="button" disabled>Return home (0,0)</button>
       <button class="btn btn-outline" id="redoHomingBtn" type="button">Redo homing</button>
 
       <p class="status" id="motorStatus" role="status" aria-live="polite"></p>
@@ -906,6 +907,7 @@
   const badgeA      = document.getElementById('badgeA');
   const badgeB      = document.getElementById('badgeB');
   const redoHomingBtn = document.getElementById('redoHomingBtn');
+  const goHomeBtn     = document.getElementById('goHomeBtn');
   const drawAreaNote  = document.getElementById('drawAreaNote');
   const stepBtns = { 5: document.getElementById('stepSmall'),
                      10: document.getElementById('stepMedium'),
@@ -958,6 +960,7 @@
       'Home both arms to see live angles');
     machineCalibrated = !!pos.calibrated;
     updateSendGate();
+    goHomeBtn.disabled = !machineCalibrated;
 
     if (drawArea && machineCalibrated) {
       drawAreaNote.textContent = `${drawArea.w.toFixed(1)} × ${drawArea.h.toFixed(1)} units — (0,0) is the bottom-left corner`;
@@ -1104,7 +1107,6 @@
     if (jogBusy) return;                       // one move at a time — avoids key-repeat floods
     jogBusy = true;
     jogBtns.forEach(b => b.disabled = true);
-    const wasCalibrated = machineCalibrated;
     setMotorStatus(`Motor ${motor} ${direction.toUpperCase()} ${motorStep}°…`, '');
     try {
       const res = await fetch('/motor', {
@@ -1117,13 +1119,6 @@
         renderPosition(data.position);
         if (data.limit) {
           setMotorStatus(`Arm ${motor} hit its limit switch — homed at its known angle.`, 'ok');
-          if (!wasCalibrated && machineCalibrated) {
-            // Both arms just homed — the firmware auto-parks at (0,0); watch it travel there.
-            setMotorStatus('Both arms homed — parking at (0,0)…', 'ok');
-            await pollAutoTravel();
-            setMotorStatus('Parked at (0,0), the drawing area\'s bottom-left corner.', 'ok');
-            loadPosition();
-          }
         } else {
           setMotorStatus(
             data.forwarded === false
@@ -1142,9 +1137,9 @@
     }
   }
 
-  // Polls /device_status while the firmware auto-travels to (0,0) right after
-  // calibration completes, so the live pose diagram tracks the arms in real
-  // time instead of jumping straight to the final pose.
+  // Polls /device_status while the firmware travels to (0,0) after a /home
+  // request, so the live pose diagram tracks the arms in real time instead of
+  // jumping straight to the final pose.
   function pollAutoTravel() {
     return new Promise(resolve => {
       let ticks = 0;
@@ -1165,6 +1160,29 @@
       }, 200);
     });
   }
+
+  goHomeBtn.addEventListener('click', async () => {
+    if (jogBusy) return;
+    jogBusy = true;
+    goHomeBtn.disabled = true;
+    setMotorStatus('Returning home — travelling to (0,0)…', '');
+    try {
+      const res = await fetch('/home', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        await pollAutoTravel();
+        setMotorStatus('Parked at (0,0), the drawing area\'s bottom-left corner.', 'ok');
+        loadPosition();
+      } else {
+        setMotorStatus(data.error || `Return home failed (HTTP ${res.status}).`, 'err');
+      }
+    } catch (_) {
+      setMotorStatus("Could not reach the plotter. Check you're on the same Wi-Fi.", 'err');
+    } finally {
+      goHomeBtn.disabled = false;
+      jogBusy = false;
+    }
+  });
 
   redoHomingBtn.addEventListener('click', async () => {
     if (jogBusy) return;

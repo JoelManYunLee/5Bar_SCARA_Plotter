@@ -30,7 +30,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
-from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command, get_device_status
+from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command, send_home_command, get_device_status
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 OUTPUTS_FOLDER = os.path.join(BASE_DIR, "outputs")
@@ -285,6 +285,28 @@ def reset_homing():
         pos["motor_b_deg"] = None
         pos = save_position(pos)
     return jsonify(ok=True, position=pos)
+
+
+@app.route("/home", methods=["POST"])
+def home():
+    """Send the plotter to the drawing area's (0,0) corner (pen up).
+
+    Requires both arms to be homed; forwards to the device's own /home, which
+    runs the travel asynchronously so /device_status keeps reporting live angles.
+    """
+    with _position_lock:
+        calibrated = load_position()["calibrated"]
+    if not calibrated:
+        return jsonify(ok=False, error="Calibrate both arms before returning home."), 409
+    if not PLOTTER_IP:
+        return jsonify(ok=False, error="No plotter device configured."), 409
+
+    result = send_home_command(PLOTTER_IP, PLOTTER_PORT)
+    if result is None:
+        return jsonify(ok=False, error="Could not reach the plotter device."), 502
+    if not result:
+        return jsonify(ok=False, error="Plotter rejected the home request (busy?)."), 409
+    return jsonify(ok=True)
 
 
 @app.route("/device_status")

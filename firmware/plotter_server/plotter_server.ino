@@ -7,14 +7,17 @@
  * reference), and absolute step tracking begins from there. Positions survive
  * power cycles via NVS, so the machine stays calibrated between sessions.
  *
- * Once both arms are homed, the firmware solves forward kinematics for the pen
- * position, then automatically travels (pen up) to the drawing rectangle's
- * bottom-left corner (0,0) — asynchronously, so /position keeps reporting live
- * angles the whole way — and begins accepting /plot from there.
+ * Once both arms are homed, /plot is accepted. Travelling (pen up) to the
+ * drawing rectangle's bottom-left corner (0,0) is a separate, explicit action —
+ * POST /home from the server's "return home" button — run asynchronously, so
+ * /position keeps reporting live angles the whole way.
  *
  *   POST /motor   {motor:"A"|"B", direction:"cw"|"ccw", degrees:<n>}
  *                 → jog; stop early if the switch engages
  *                 ← {ok:true, limit:<bool>, homed:<bool>, position_deg:<n|null>}
+ *   POST /home    (only after both arms homed)
+ *                 → travel (pen up) to the drawing area's (0,0) corner
+ *                 ← {ok:true}  (202; travel runs async)
  *   POST /plot    {width,height,paths,weights}  (only after both arms homed)
  *                 → fit into the drawing area, run IK, stream strokes with pen lift
  *                 ← {ok:true, accepted:{paths,points}}  (202; drawing runs async)
@@ -122,10 +125,9 @@ Preferences  prefs;
 Servo        penServo;
 
 // Calibration / plotting state.
-static bool atReady      = false;  // both arms homed, accepting /plot (no fixed pose required)
-static bool pendingReady = false;  // both arms just homed → report pose, arm /plot
+static bool atReady      = false;  // both arms homed, accepting /plot and /home
 static bool penDown      = false;
-static bool travelActive = false;  // auto-parking at (0,0) after calibration, driven from loop() so /position stays live
+static bool travelActive = false;  // travelling to (0,0) via /home, driven from loop() so /position stays live
 
 // A drawing job, filled by /plot and executed one point per loop() so the HTTP
 // server stays responsive while the strokes stream out.
@@ -199,7 +201,7 @@ static bool jog_arm(Arm& arm, const String& direction, float degrees) {
   return hit;
 }
 
-// ── Forward kinematics ──────────────────────────────────────────────────────────
+// ── Kinematics ──────────────────────────────────────────────────────────────────
 
 // Two circle intersections; returns the count, points written to out[][2].
 static int circle_intersections(float x0, float y0, float r0,
@@ -215,23 +217,6 @@ static int circle_intersections(float x0, float y0, float r0,
   out[0][0] = xm + h * ux;  out[0][1] = ym + h * uy;
   out[1][0] = xm - h * ux;  out[1][1] = ym - h * uy;
   return (h < 1e-6f) ? 1 : 2;
-}
-
-// End-effector (pen) position for the given motor angles (deg, CCW from +X).
-static bool forward_kinematics(float thetaA_deg, float thetaB_deg, float* px, float* py) {
-  float ta = radians(thetaA_deg), tb = radians(thetaB_deg);
-  float e1x = -LINK_BASE / 2.0f + LINK_PROX * cosf(ta), e1y = LINK_PROX * sinf(ta);
-  float e2x =  LINK_BASE / 2.0f + LINK_PROX * cosf(tb), e2y = LINK_PROX * sinf(tb);
-  float out[2][2];
-  int n = circle_intersections(e1x, e1y, LINK_DIST, e2x, e2y, LINK_DIST, out);
-  if (n == 0) return false;
-  int pick = 0;
-  if (n == 2) {
-    bool lowerIsOne = out[1][1] < out[0][1];
-    pick = (PEN_LOWER_SOLUTION ? lowerIsOne : !lowerIsOne) ? 1 : 0;
-  }
-  *px = out[pick][0];  *py = out[pick][1];
-  return true;
 }
 
 // Motor angles (radians, CCW from +X) for a pen target; picks the outward elbow
@@ -266,20 +251,16 @@ static void move_to_angles(float thetaA_deg, float thetaB_deg) {
   persist(armB);
 }
 
-// Both arms just homed: report the pen position, then auto-travel (pen up) to
-// the drawing rectangle's origin (0,0), asynchronously — travel_step() drives
-// it from loop() so /position keeps reporting live angles the whole way.
-static void go_ready() {
-  float x, y;
-  if (forward_kinematics(arm_position_deg(armA), arm_position_deg(armB), &x, &y))
-    Serial.printf("[fk] homed pen position = (%.2f, %.2f)\n", x, y);
-
+// Travel (pen up) to the drawing rectangle's origin (0,0), asynchronously —
+// travel_step() drives it from loop() so /position keeps reporting live angles
+// the whole way. Triggered on demand by the server's "return home" button.
+static bool start_travel_home() {
   float targetX = DRAW_CX - DRAW_W / 2.0f;
   float targetY = DRAW_CY - DRAW_H / 2.0f;
   float ta, tb;
   if (!inverse_kinematics(targetX, targetY, &ta, &tb)) {
-    Serial.println("[goto] origin (0,0) unreachable — staying at the homed pose");
-    return;
+    Serial.println("[home] origin (0,0) unreachable — staying at the current pose");
+    return false;
   }
 
   if (penDown) pen_up();
@@ -288,7 +269,8 @@ static void go_ready() {
   motorA.moveTo(lroundf(degrees(ta) * STEPS_PER_DEG));
   motorB.moveTo(lroundf(degrees(tb) * STEPS_PER_DEG));
   travelActive = true;                                 // travel_step() takes it from here
-  Serial.println("[goto] auto-parking at (0,0)");
+  Serial.println("[home] travelling to (0,0)");
+  return true;
 }
 
 // ── Pen + plotting ──────────────────────────────────────────────────────────────
@@ -353,8 +335,8 @@ static void plot_step() {
   }
 }
 
-// Drives the post-calibration auto-travel to (0,0) one AccelStepper tick at a
-// time from loop(), instead of blocking, so /position keeps reporting live angles.
+// Drives the /home travel to (0,0) one AccelStepper tick at a time from
+// loop(), instead of blocking, so /position keeps reporting live angles.
 static void travel_step() {
   motorA.run();
   motorB.run();
@@ -364,7 +346,7 @@ static void travel_step() {
   motorB.setMaxSpeed(JOG_MAX_SPEED); motorB.setAcceleration(JOG_ACCEL);
   persist(armA); persist(armB);
   travelActive = false;
-  Serial.println("[goto] parked at (0,0)");
+  Serial.println("[home] parked at (0,0)");
 }
 
 // ── HTTP handlers ──────────────────────────────────────────────────────────────
@@ -386,7 +368,7 @@ static void handle_motor() {
     return;
   }
   if (travelActive) {
-    send_json(409, "{\"ok\":false,\"error\":\"busy — auto-parking at (0,0)\"}");
+    send_json(409, "{\"ok\":false,\"error\":\"busy — travelling home\"}");
     return;
   }
 
@@ -425,11 +407,6 @@ static void handle_motor() {
     return;
   }
 
-  bool wasCalibrated = armA.homed && armB.homed;
-
-  Serial.printf("[motor] starting jog. limit currently=%d\n",
-                limit_pressed(*arm));
-
   bool hit = jog_arm(*arm, dir, deg);
 
   Serial.printf(
@@ -439,8 +416,7 @@ static void handle_motor() {
       arm_position_deg(*arm)
   );
 
-  if (!wasCalibrated && armA.homed && armB.homed)
-    pendingReady = true;
+  if (armA.homed && armB.homed) atReady = true;
 
   String posStr =
       arm->homed ? String(arm_position_deg(*arm), 3) : String("null");
@@ -466,11 +442,21 @@ static void handle_position() {
   send_json(200, body);
 }
 
+// Triggered by the server's "return home" button — travels (pen up) to (0,0).
+static void handle_home() {
+  if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
+  if (!atReady)      { send_json(409, "{\"ok\":false,\"error\":\"not ready — home both arms first\"}"); return; }
+  if (job.active)    { send_json(409, "{\"ok\":false,\"error\":\"busy — a plot is already running\"}"); return; }
+  if (travelActive)  { send_json(409, "{\"ok\":false,\"error\":\"busy — already travelling home\"}"); return; }
+  if (!start_travel_home()) { send_json(409, "{\"ok\":false,\"error\":\"origin (0,0) unreachable\"}"); return; }
+  send_json(202, "{\"ok\":true}");
+}
+
 static void handle_plot() {
   if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
   if (!atReady)   { send_json(409, "{\"ok\":false,\"error\":\"not ready — home both arms first\"}"); return; }
   if (job.active) { send_json(409, "{\"ok\":false,\"error\":\"busy — a plot is already running\"}"); return; }
-  if (travelActive) { send_json(409, "{\"ok\":false,\"error\":\"busy — auto-parking at (0,0)\"}"); return; }
+  if (travelActive) { send_json(409, "{\"ok\":false,\"error\":\"busy — travelling home\"}"); return; }
 
   // The stroke JSON can be large; size the parser from the biggest free block.
   DynamicJsonDocument doc((ESP.getMaxAllocHeap() * 3) / 4);
@@ -567,6 +553,7 @@ void setup() {
   server.on("/", HTTP_GET, handle_root);
   server.on("/motor", HTTP_POST, handle_motor);
   server.on("/plot", HTTP_POST, handle_plot);
+  server.on("/home", HTTP_POST, handle_home);
   server.on("/position", HTTP_GET, handle_position);
   server.begin();
   Serial.println("[http] server started");
@@ -574,11 +561,6 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  if (pendingReady) {           // both arms just homed → report pose, kick off auto-travel to (0,0)
-    pendingReady = false;
-    go_ready();
-    atReady = true;
-  }
   if (job.active)    plot_step();    // stream the current drawing, one point per loop
-  if (travelActive)  travel_step();  // drive the auto-park-at-origin move, one tick per loop
+  if (travelActive)  travel_step();  // drive the travel-home move, one tick per loop
 }
