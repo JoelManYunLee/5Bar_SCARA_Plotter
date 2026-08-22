@@ -111,10 +111,10 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 #define PEN_SETTLE_MS     220     // time for the servo to reach position
 
 // ── Drawing area: the image is fitted into this rectangle (robot units) ────────
-#define DRAW_CX   0.0f    // centre X of the drawing area
-#define DRAW_CY   7.0f    // centre Y
-#define DRAW_W    8.0f    // max width  (aspect ratio preserved)
-#define DRAW_H    6.0f    // max height
+#define DRAW_CX   0.0f     // centre X of the drawing area
+#define DRAW_CY   13.0f    // centre Y (kept well clear of the low-y singularity band near the bases)
+#define DRAW_W    12.0f    // max width  (aspect ratio preserved)
+#define DRAW_H    14.0f    // max height
 
 // ── Draw motion profile & safety cap ───────────────────────────────────────────
 #define DRAW_MAX_SPEED   1500.0f
