@@ -10,13 +10,18 @@
  * Once both arms are homed, /plot is accepted. Travelling (pen up) to the
  * drawing rectangle's bottom-left corner (0,0) is a separate, explicit action —
  * POST /home from the server's "return home" button — run asynchronously, so
- * /position keeps reporting live angles the whole way.
+ * /position keeps reporting live angles the whole way. POST /goto drives the
+ * same async travel to an arbitrary point, for the server's XY jog joystick.
  *
  *   POST /motor   {motor:"A"|"B", direction:"cw"|"ccw", degrees:<n>}
  *                 → jog; stop early if the switch engages
  *                 ← {ok:true, limit:<bool>, homed:<bool>, position_deg:<n|null>}
  *   POST /home    (only after both arms homed)
  *                 → travel (pen up) to the drawing area's (0,0) corner
+ *                 ← {ok:true}  (202; travel runs async)
+ *   POST /goto    {x,y}  (only after both arms homed)
+ *                 → travel (pen up) to an arbitrary drawing-space point; a
+ *                   request while already travelling retargets it live
  *                 ← {ok:true}  (202; travel runs async)
  *   POST /plot    {width,height,paths,weights}  (only after both arms homed)
  *                 → fit into the drawing area, run IK, stream strokes with pen lift
@@ -251,27 +256,28 @@ static void move_to_angles(float thetaA_deg, float thetaB_deg) {
   persist(armB);
 }
 
-// Travel (pen up) to the drawing rectangle's origin (0,0), asynchronously —
-// travel_step() drives it from loop() so /position keeps reporting live angles
-// the whole way. Triggered on demand by the server's "return home" button.
-static bool start_travel_home() {
-  float targetX = DRAW_CX - DRAW_W / 2.0f;
-  float targetY = DRAW_CY - DRAW_H / 2.0f;
+// Travel (pen up) to a drawing-space point, asynchronously — travel_step()
+// drives it from loop() so /position keeps reporting live angles the whole
+// way. Safe to call again mid-travel to retarget (e.g. a dragged jog request),
+// which just redirects the in-flight move instead of restarting it.
+static bool start_travel_to(float x, float y) {
   float ta, tb;
-  if (!inverse_kinematics(targetX, targetY, &ta, &tb)) {
-    Serial.println("[home] origin (0,0) unreachable — staying at the current pose");
+  if (!inverse_kinematics(x, y, &ta, &tb)) {
+    Serial.println("[goto] target unreachable — staying at the current pose");
     return false;
   }
 
-  if (penDown) pen_up();
-  motorA.setMaxSpeed(DRAW_MAX_SPEED); motorA.setAcceleration(DRAW_ACCEL);
-  motorB.setMaxSpeed(DRAW_MAX_SPEED); motorB.setAcceleration(DRAW_ACCEL);
+  if (!travelActive) {
+    if (penDown) pen_up();
+    motorA.setMaxSpeed(DRAW_MAX_SPEED); motorA.setAcceleration(DRAW_ACCEL);
+    motorB.setMaxSpeed(DRAW_MAX_SPEED); motorB.setAcceleration(DRAW_ACCEL);
+  }
   motorA.moveTo(lroundf(degrees(ta) * STEPS_PER_DEG));
   motorB.moveTo(lroundf(degrees(tb) * STEPS_PER_DEG));
   travelActive = true;                                 // travel_step() takes it from here
-  Serial.println("[home] travelling to (0,0)");
   return true;
 }
+
 
 // ── Pen + plotting ──────────────────────────────────────────────────────────────
 
@@ -346,7 +352,7 @@ static void travel_step() {
   motorB.setMaxSpeed(JOG_MAX_SPEED); motorB.setAcceleration(JOG_ACCEL);
   persist(armA); persist(armB);
   travelActive = false;
-  Serial.println("[home] parked at (0,0)");
+  Serial.println("[goto] arrived");
 }
 
 // ── HTTP handlers ──────────────────────────────────────────────────────────────
@@ -448,7 +454,31 @@ static void handle_home() {
   if (!atReady)      { send_json(409, "{\"ok\":false,\"error\":\"not ready — home both arms first\"}"); return; }
   if (job.active)    { send_json(409, "{\"ok\":false,\"error\":\"busy — a plot is already running\"}"); return; }
   if (travelActive)  { send_json(409, "{\"ok\":false,\"error\":\"busy — already travelling home\"}"); return; }
-  if (!start_travel_home()) { send_json(409, "{\"ok\":false,\"error\":\"origin (0,0) unreachable\"}"); return; }
+  if (!start_travel_to(DRAW_CX - DRAW_W / 2.0f, DRAW_CY - DRAW_H / 2.0f)) {
+    send_json(409, "{\"ok\":false,\"error\":\"origin (0,0) unreachable\"}");
+    return;
+  }
+  send_json(202, "{\"ok\":true}");
+}
+
+// Drives the XY jog joystick — POST {x,y} (drawing-space units). Unlike /home,
+// a request while already travelling just retargets the in-flight move, so
+// dragging the joystick continuously redirects the pen instead of queuing up.
+static void handle_goto() {
+  if (server.method() != HTTP_POST) { send_json(405, "{\"ok\":false,\"error\":\"POST only\"}"); return; }
+  if (!atReady)   { send_json(409, "{\"ok\":false,\"error\":\"not ready — home both arms first\"}"); return; }
+  if (job.active) { send_json(409, "{\"ok\":false,\"error\":\"busy — a plot is already running\"}"); return; }
+
+  StaticJsonDocument<128> doc;
+  if (deserializeJson(doc, server.arg("plain")) || doc["x"].isNull() || doc["y"].isNull()) {
+    send_json(400, "{\"ok\":false,\"error\":\"bad JSON — need {x,y}\"}");
+    return;
+  }
+  float x = doc["x"], y = doc["y"];
+  if (!start_travel_to(x, y)) {
+    send_json(409, "{\"ok\":false,\"error\":\"target unreachable\"}");
+    return;
+  }
   send_json(202, "{\"ok\":true}");
 }
 
@@ -554,6 +584,7 @@ void setup() {
   server.on("/motor", HTTP_POST, handle_motor);
   server.on("/plot", HTTP_POST, handle_plot);
   server.on("/home", HTTP_POST, handle_home);
+  server.on("/goto", HTTP_POST, handle_goto);
   server.on("/position", HTTP_GET, handle_position);
   server.begin();
   Serial.println("[http] server started");

@@ -245,6 +245,8 @@
     background: var(--bg); border-radius: 12px; padding: 12px 14px;
   }
   .diagram-card svg { display: block; width: 100%; height: auto; }
+  .ik-pad { cursor: crosshair; touch-action: none; }
+  .ik-pad.disabled { cursor: not-allowed; opacity: .5; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -266,6 +268,7 @@
   <div class="tabs" role="tablist">
     <button class="tab-btn active" id="tabPlot"      role="tab" type="button">Plot</button>
     <button class="tab-btn"        id="tabCalibrate" role="tab" type="button">Calibrate</button>
+    <button class="tab-btn"        id="tabIK"        role="tab" type="button">Jog XY</button>
   </div>
 
   <!-- ── Plot tab ── -->
@@ -567,6 +570,41 @@
       <p class="status" id="motorStatus" role="status" aria-live="polite"></p>
     </div>
   </div><!-- /#motorTab -->
+
+  <!-- ── Jog XY tab ── -->
+  <div class="tab-panel hidden" id="ikTab" role="tabpanel">
+    <div class="motor-card">
+      <p class="set-note" style="margin:0">
+        Drag inside the drawing area to jog the pen there directly — inverse
+        kinematics solves the motor angles live as you move.
+      </p>
+
+      <p class="set-note" id="ikGateNote" style="text-align:center">Calibrate both arms in the Calibrate tab before using XY jog.</p>
+
+      <div class="diagram-card">
+        <div class="set-row" style="margin-bottom:8px">
+          <div class="set-label">Jog pad</div>
+          <span class="set-note diag-msg">Home both arms to see live angles</span>
+        </div>
+        <svg class="arm-diagram ik-pad disabled" viewBox="0 0 280 220" role="img" aria-label="Drag inside the drawing area to jog the pen">
+          <rect class="diag-drawarea" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3" opacity="0"/>
+          <circle class="diag-origin" r="4" fill="#0ea5e9" opacity="0"/>
+          <text class="diag-origin-label" font-size="9" fill="#0ea5e9" opacity="0">(0,0)</text>
+          <circle class="diag-baseA" r="5" fill="#6b7280"/>
+          <circle class="diag-baseB" r="5" fill="#6b7280"/>
+          <line class="diag-linkA1" stroke="#1f77b4" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <line class="diag-linkB1" stroke="#ff7f0e" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <line class="diag-linkA2" stroke="#2ca02c" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <line class="diag-linkB2" stroke="#d62728" stroke-width="4" stroke-linecap="round" opacity="0"/>
+          <circle class="diag-jog-target" r="7" fill="none" stroke="#8b5cf6" stroke-width="2" opacity="0"/>
+          <circle class="diag-pen-halo" r="11" fill="#ff2d55" fill-opacity="0.35" opacity="0"/>
+          <circle class="diag-pen" r="6" fill="#ff2d55" stroke="#ffffff" stroke-width="2" opacity="0"/>
+        </svg>
+      </div>
+
+      <p class="status" id="ikStatus" role="status" aria-live="polite"></p>
+    </div>
+  </div><!-- /#ikTab -->
 
 </div>
 
@@ -894,18 +932,22 @@
   // ── tab switching ────────────────────────────────────────────────────────────
   const tabPlot      = document.getElementById('tabPlot');
   const tabCalibrate = document.getElementById('tabCalibrate');
+  const tabIK        = document.getElementById('tabIK');
   const plotTab      = document.getElementById('plotTab');
   const motorTab     = document.getElementById('motorTab');
+  const ikTab        = document.getElementById('ikTab');
 
   function selectTab(which) {
-    const plot = which === 'plot';
-    tabPlot.classList.toggle('active', plot);
-    tabCalibrate.classList.toggle('active', !plot);
-    plotTab.classList.toggle('hidden', !plot);
-    motorTab.classList.toggle('hidden', plot);
+    tabPlot.classList.toggle('active', which === 'plot');
+    tabCalibrate.classList.toggle('active', which === 'calibrate');
+    tabIK.classList.toggle('active', which === 'ik');
+    plotTab.classList.toggle('hidden', which !== 'plot');
+    motorTab.classList.toggle('hidden', which !== 'calibrate');
+    ikTab.classList.toggle('hidden', which !== 'ik');
   }
   tabPlot.addEventListener('click',      () => selectTab('plot'));
   tabCalibrate.addEventListener('click', () => selectTab('calibrate'));
+  tabIK.addEventListener('click',        () => selectTab('ik'));
 
   // ── motor calibration ────────────────────────────────────────────────────────
   const motorStatus = document.getElementById('motorStatus');
@@ -966,9 +1008,15 @@
     calDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
       'Home both arms to see live angles');
     calDiagram.renderDrawArea(drawArea);
+    if (!ikDragging) {
+      ikDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
+        'Home both arms to see live angles');
+    }
+    ikDiagram.renderDrawArea(drawArea);
     machineCalibrated = !!pos.calibrated;
     updateSendGate();
     goHomeBtn.disabled = !machineCalibrated;
+    updateIkGate();
 
     if (drawArea && machineCalibrated) {
       drawAreaNote.textContent = `${drawArea.w.toFixed(1)} × ${drawArea.h.toFixed(1)} units — (0,0) is the bottom-left corner`;
@@ -1025,8 +1073,8 @@
     };
   }
 
-  // Robot-space (x, y) -> SVG pixel coords, fit to the diagram's fixed viewBox.
-  function diagramTransform(d, l1, l2) {
+  // Robot-space <-> SVG pixel coords, fit to the diagram's fixed viewBox.
+  function diagramBounds(d, l1, l2) {
     const maxReach = l1 + l2;
     const xMin = -(d / 2 + maxReach), xMax = d / 2 + maxReach;
     const yMin = -maxReach * 0.15, yMax = maxReach * 1.05;
@@ -1034,11 +1082,23 @@
       (DIAG_W - 2 * DIAG_PAD) / (xMax - xMin),
       (DIAG_H - 2 * DIAG_PAD) / (yMax - yMin)
     );
+    return { xMin, xMax, yMin, yMax, scale };
+  }
+  function diagramTransform(d, l1, l2) {
+    const { xMin, yMin, scale } = diagramBounds(d, l1, l2);
     return (x, y) => [
       (x - xMin) * scale + DIAG_PAD,
       DIAG_H - DIAG_PAD - (y - yMin) * scale,
     ];
   }
+  function diagramInverseTransform(d, l1, l2) {
+    const { xMin, yMin, scale } = diagramBounds(d, l1, l2);
+    return (px, py) => [
+      (px - DIAG_PAD) / scale + xMin,
+      yMin + (DIAG_H - DIAG_PAD - py) / scale,
+    ];
+  }
+
 
   // Binds a renderer to one <svg class="arm-diagram"> instance, so the Calibrate
   // tab and the Plot tab's drawing preview can each keep their own pose on screen.
@@ -1172,10 +1232,10 @@
     }
   }
 
-  // Polls /device_status while the firmware travels to (0,0) after a /home
-  // request, so the live pose diagram tracks the arms in real time instead of
-  // jumping straight to the final pose.
-  function pollAutoTravel() {
+  // Polls /device_status while the firmware travels toward a target (/home or
+  // /goto), rendering into the given diagram so the live pose tracks the arms
+  // in real time instead of jumping straight to the final pose.
+  function pollDeviceMove(diagram) {
     return new Promise(resolve => {
       let ticks = 0;
       const timer = setInterval(async () => {
@@ -1190,8 +1250,8 @@
         if (!data || !data.ok || !data.live) { clearInterval(timer); resolve(); return; }
         const aDeg = data.a && data.a.homed ? data.a.deg : null;
         const bDeg = data.b && data.b.homed ? data.b.deg : null;
-        calDiagram.render(aDeg, bDeg, 'Home both arms to see live angles');
-        if (!data.moving || ticks > 100) { clearInterval(timer); resolve(); }  // ~20s safety cap
+        diagram.render(aDeg, bDeg, 'Home both arms to see live angles');
+        if (!data.moving || ticks > 150) { clearInterval(timer); resolve(); }  // ~30s safety cap
       }, 200);
     });
   }
@@ -1205,7 +1265,7 @@
       const res = await fetch('/home', { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
-        await pollAutoTravel();
+        await pollDeviceMove(calDiagram);
         await fetch('/sync_position', { method: 'POST' });  // pull the real angles back into position.json
         setMotorStatus('Parked at (0,0), the drawing area\'s bottom-left corner.', 'ok');
         loadPosition();
@@ -1242,6 +1302,103 @@
       jogBusy = false;
     }
   });
+
+  // ── Jog XY (virtual joystick) ────────────────────────────────────────────────
+  const ikGateNote = document.getElementById('ikGateNote');
+  const ikStatus   = document.getElementById('ikStatus');
+  const ikPad      = document.querySelector('#ikTab .ik-pad');
+  const ikTarget   = document.querySelector('#ikTab .diag-jog-target');
+  const ikDiagram  = createArmDiagram(ikPad);
+
+  function setIkStatus(msg, kind) {
+    ikStatus.textContent = msg;
+    ikStatus.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function updateIkGate() {
+    ikGateNote.style.display = machineCalibrated ? 'none' : '';
+    ikPad.classList.toggle('disabled', !machineCalibrated);
+  }
+
+  // Pointer position on the pad -> robot-space (x, y), clamped to the drawing area.
+  function ikPointToRobot(evt) {
+    const rect = ikPad.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) / rect.width * DIAG_W;
+    const py = (evt.clientY - rect.top) / rect.height * DIAG_H;
+    const { base: d, proximal: l1, distal: l2 } = geometry;
+    let [x, y] = diagramInverseTransform(d, l1, l2)(px, py);
+    if (drawArea) {
+      x = Math.min(drawArea.cx + drawArea.w / 2, Math.max(drawArea.cx - drawArea.w / 2, x));
+      y = Math.min(drawArea.cy + drawArea.h / 2, Math.max(drawArea.cy - drawArea.h / 2, y));
+    }
+    return [x, y];
+  }
+
+  function showIkTarget(x, y) {
+    const { base: d, proximal: l1, distal: l2 } = geometry;
+    const [px, py] = diagramTransform(d, l1, l2)(x, y);
+    ikTarget.setAttribute('cx', px);
+    ikTarget.setAttribute('cy', py);
+    ikTarget.setAttribute('opacity', '1');
+  }
+
+  let ikDragging   = false;
+  let ikPending    = null;    // [x, y] queued to send
+  let ikSendTimer  = null;    // throttles /goto while dragging
+  let ikMovePromise = null;   // resolves once the device stops moving
+
+  async function ikSendPending() {
+    if (!ikPending) return;
+    const [x, y] = ikPending;
+    ikPending = null;
+    try {
+      const res = await fetch('/goto', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x, y }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) setIkStatus(data.error || `Move failed (HTTP ${res.status}).`, 'err');
+    } catch (_) {
+      setIkStatus("Could not reach the plotter. Check you're on the same Wi-Fi.", 'err');
+    }
+  }
+
+  function ikPointerDown(evt) {
+    if (!machineCalibrated || !geometry) return;
+    ikPad.setPointerCapture(evt.pointerId);
+    ikDragging = true;
+    setIkStatus('Jogging…', '');
+    if (!ikSendTimer) ikSendTimer = setInterval(ikSendPending, 150);
+    if (!ikMovePromise) ikMovePromise = pollDeviceMove(ikDiagram);
+    ikPointerMove(evt);
+  }
+
+  function ikPointerMove(evt) {
+    if (!ikDragging) return;
+    evt.preventDefault();
+    const [x, y] = ikPointToRobot(evt);
+    showIkTarget(x, y);
+    ikPending = [x, y];
+  }
+
+  async function ikPointerUp() {
+    if (!ikDragging) return;
+    ikDragging = false;
+    clearInterval(ikSendTimer); ikSendTimer = null;
+    await ikSendPending();               // make sure the final target actually reaches the device
+    if (ikMovePromise) { await ikMovePromise; ikMovePromise = null; }
+    ikTarget.setAttribute('opacity', '0');
+    await fetch('/sync_position', { method: 'POST' });  // pull the real angles back into position.json
+    loadPosition();
+    setIkStatus('Move complete.', 'ok');
+  }
+
+  ikPad.addEventListener('pointerdown', ikPointerDown);
+  ikPad.addEventListener('pointermove', ikPointerMove);
+  ikPad.addEventListener('pointerup', ikPointerUp);
+  ikPad.addEventListener('pointercancel', ikPointerUp);
+  ikPad.addEventListener('pointerleave', evt => { if (ikDragging && evt.buttons === 0) ikPointerUp(); });
 
   // keyboard jog — active only while the Calibrate tab is visible
   const keyMap = {

@@ -422,6 +422,31 @@ def send_home_command(ip: str, port: int = 9000, timeout: float = 5.0):
         return None
 
 
+def send_goto_command(x: float, y: float, ip: str, port: int = 9000, timeout: float = 5.0):
+    """Jog the pen to an arbitrary drawing-space (x, y) point, for the XY joystick.
+
+    POSTs to http://<ip>:<port>/goto. A request while the device is already
+    travelling just retargets the in-flight move. Returns True on success,
+    False if the device rejected the request, or None if unreachable.
+    """
+    import urllib.request
+    import urllib.error
+    body = json.dumps({"x": round(float(x), 3), "y": round(float(y), 3)}).encode()
+    req = urllib.request.Request(
+        f"http://{ip}:{port}/goto",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status < 400
+    except urllib.error.HTTPError:
+        return False
+    except urllib.error.URLError:
+        return None
+
+
 def get_device_status(ip: str, port: int = 9000, timeout: float = 3.0):
     """GET http://<ip>:<port>/position — the firmware's live motor state.
 

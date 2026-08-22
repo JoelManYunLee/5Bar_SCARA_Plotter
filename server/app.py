@@ -30,7 +30,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
-from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command, send_home_command, get_device_status
+from process import Params, photo_to_paths, write_svg, write_preview, write_json, path_stats, send_to_device, send_motor_command, send_home_command, send_goto_command, get_device_status
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 OUTPUTS_FOLDER = os.path.join(BASE_DIR, "outputs")
@@ -306,6 +306,35 @@ def home():
         return jsonify(ok=False, error="Could not reach the plotter device."), 502
     if not result:
         return jsonify(ok=False, error="Plotter rejected the home request (busy?)."), 409
+    return jsonify(ok=True)
+
+
+@app.route("/goto", methods=["POST"])
+def goto():
+    """Jog the pen to an arbitrary (x, y) point, for the XY jog joystick.
+
+    Requires both arms to be homed; forwards to the device's own /goto, which
+    retargets an in-flight move live so dragging the joystick feels immediate.
+    """
+    with _position_lock:
+        calibrated = load_position()["calibrated"]
+    if not calibrated:
+        return jsonify(ok=False, error="Calibrate both arms before using XY jog."), 409
+    if not PLOTTER_IP:
+        return jsonify(ok=False, error="No plotter device configured."), 409
+
+    data = request.get_json(silent=True) or {}
+    try:
+        x = float(data["x"])
+        y = float(data["y"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify(ok=False, error="x and y must be numbers."), 400
+
+    result = send_goto_command(x, y, PLOTTER_IP, PLOTTER_PORT)
+    if result is None:
+        return jsonify(ok=False, error="Could not reach the plotter device."), 502
+    if not result:
+        return jsonify(ok=False, error="Plotter rejected the move (unreachable point?)."), 409
     return jsonify(ok=True)
 
 
