@@ -426,6 +426,9 @@
         <span class="set-note diag-msg" id="plotPreviewNote"></span>
       </div>
       <svg class="arm-diagram" viewBox="0 0 280 220" role="img" aria-label="Live five-bar drawing preview">
+        <rect class="diag-drawarea" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3" opacity="0"/>
+        <circle class="diag-origin" r="4" fill="#0ea5e9" opacity="0"/>
+        <text class="diag-origin-label" font-size="9" fill="#0ea5e9" opacity="0">(0,0)</text>
         <circle class="diag-baseA" r="5" fill="#6b7280"/>
         <circle class="diag-baseB" r="5" fill="#6b7280"/>
         <line class="diag-linkA1" stroke="#1f77b4" stroke-width="4" stroke-linecap="round" opacity="0"/>
@@ -463,6 +466,9 @@
           <span class="set-note diag-msg">Home both arms to see live angles</span>
         </div>
         <svg class="arm-diagram" viewBox="0 0 280 220" role="img" aria-label="Live five-bar arm pose">
+          <rect class="diag-drawarea" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3" opacity="0"/>
+          <circle class="diag-origin" r="4" fill="#0ea5e9" opacity="0"/>
+          <text class="diag-origin-label" font-size="9" fill="#0ea5e9" opacity="0">(0,0)</text>
           <circle class="diag-baseA" r="5" fill="#6b7280"/>
           <circle class="diag-baseB" r="5" fill="#6b7280"/>
           <line class="diag-linkA1" stroke="#1f77b4" stroke-width="4" stroke-linecap="round" opacity="0"/>
@@ -783,6 +789,7 @@
     stopPlotPreview();
     if (!processing || processing.error || !processing.json) return;
     plotPreview.style.display = '';
+    plotDiagram.renderDrawArea(drawArea);
     plotPreviewNote.textContent = 'Loading strokes…';
 
     let strokes;
@@ -958,6 +965,7 @@
     const homed = pos.a_homed && pos.b_homed && pos.motor_a_deg != null && pos.motor_b_deg != null;
     calDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
       'Home both arms to see live angles');
+    calDiagram.renderDrawArea(drawArea);
     machineCalibrated = !!pos.calibrated;
     updateSendGate();
     goHomeBtn.disabled = !machineCalibrated;
@@ -1045,6 +1053,9 @@
     const pen     = svgEl.querySelector('.diag-pen');
     const penHalo = svgEl.querySelector('.diag-pen-halo');
     const trace   = svgEl.querySelector('.diag-trace');
+    const drawAreaRect  = svgEl.querySelector('.diag-drawarea');
+    const originDot     = svgEl.querySelector('.diag-origin');
+    const originLabel   = svgEl.querySelector('.diag-origin-label');
     const armEls  = [linkA1, linkB1, linkA2, linkB2, pen, penHalo];
 
     function setLine(el, x1, y1, x2, y2) {
@@ -1053,6 +1064,30 @@
     }
     function setVisible(v) {
       armEls.forEach(el => el.setAttribute('opacity', v ? '1' : '0'));
+    }
+
+    // Draws the drawing rectangle and marks its bottom-left corner — the (0,0)
+    // the "return home" action travels to — so the pose above it is easy to judge.
+    function renderDrawArea(area) {
+      if (!area || !geometry) {
+        drawAreaRect.setAttribute('opacity', '0');
+        originDot.setAttribute('opacity', '0');
+        originLabel.setAttribute('opacity', '0');
+        return;
+      }
+      const { base: d, proximal: l1, distal: l2 } = geometry;
+      const toPx = diagramTransform(d, l1, l2);
+      const [x0, y0] = toPx(area.cx - area.w / 2, area.cy - area.h / 2);  // bottom-left = (0,0)
+      const [x1, y1] = toPx(area.cx + area.w / 2, area.cy + area.h / 2);  // top-right
+      drawAreaRect.setAttribute('x', Math.min(x0, x1));
+      drawAreaRect.setAttribute('y', Math.min(y0, y1));
+      drawAreaRect.setAttribute('width', Math.abs(x1 - x0));
+      drawAreaRect.setAttribute('height', Math.abs(y1 - y0));
+      drawAreaRect.setAttribute('opacity', '1');
+      originDot.setAttribute('cx', x0); originDot.setAttribute('cy', y0);
+      originDot.setAttribute('opacity', '1');
+      originLabel.setAttribute('x', x0 + 7); originLabel.setAttribute('y', y0 - 7);
+      originLabel.setAttribute('opacity', '1');
     }
 
     // thetaADeg/thetaBDeg null => pose unknown; shows unreachableMsg in that case.
@@ -1097,7 +1132,7 @@
       if (trace) trace.setAttribute('points', '');
     }
 
-    return { render, addTracePoint, clearTrace };
+    return { render, addTracePoint, clearTrace, renderDrawArea };
   }
 
   const calDiagram  = createArmDiagram(document.querySelector('#motorTab .arm-diagram'));
@@ -1171,6 +1206,7 @@
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
         await pollAutoTravel();
+        await fetch('/sync_position', { method: 'POST' });  // pull the real angles back into position.json
         setMotorStatus('Parked at (0,0), the drawing area\'s bottom-left corner.', 'ok');
         loadPosition();
       } else {

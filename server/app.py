@@ -309,6 +309,32 @@ def home():
     return jsonify(ok=True)
 
 
+@app.route("/sync_position", methods=["POST"])
+def sync_position():
+    """Refresh position.json from the plotter's live angles.
+
+    Firmware-driven moves (e.g. /home) change the arm angles without going
+    through /motor, so our jog-tracked position.json goes stale. The client
+    calls this once the device reports it's no longer moving to pull the real
+    angles back in.
+    """
+    if not PLOTTER_IP:
+        return jsonify(ok=False, error="No plotter device configured."), 409
+    status = get_device_status(PLOTTER_IP, PLOTTER_PORT)
+    if status is None:
+        return jsonify(ok=False, error="Could not reach the plotter device."), 502
+
+    with _position_lock:
+        pos = load_position()
+        a, b = status.get("a", {}), status.get("b", {})
+        if a.get("homed") and a.get("deg") is not None:
+            pos["motor_a_deg"], pos["a_homed"] = round(float(a["deg"]), 3), True
+        if b.get("homed") and b.get("deg") is not None:
+            pos["motor_b_deg"], pos["b_homed"] = round(float(b["deg"]), 3), True
+        pos = save_position(pos)
+    return jsonify(ok=True, position=pos)
+
+
 @app.route("/device_status")
 def device_status():
     """Proxy the plotter firmware's live /position while it's drawing.
