@@ -61,9 +61,9 @@ ARM_GEOMETRY = {
 # simulated drawing preview when no physical plotter is connected.
 DRAW_AREA = {
     "cx": float(os.environ.get("DRAW_CX", "0.0")),
-    "cy": float(os.environ.get("DRAW_CY", "13.0")),
+    "cy": float(os.environ.get("DRAW_CY", "15.0")),
     "w":  float(os.environ.get("DRAW_W", "12.0")),
-    "h":  float(os.environ.get("DRAW_H", "14.0")),
+    "h":  float(os.environ.get("DRAW_H", "12.0")),
 }
 
 # Overridden to True by --sim at startup; False when running on real hardware.

@@ -112,9 +112,9 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 
 // ── Drawing area: the image is fitted into this rectangle (robot units) ────────
 #define DRAW_CX   0.0f     // centre X of the drawing area
-#define DRAW_CY   13.0f    // centre Y (kept well clear of the low-y singularity band near the bases)
+#define DRAW_CY   15.0f    // centre Y (verified: a non-crossing pose exists everywhere in the rect)
 #define DRAW_W    12.0f    // max width  (aspect ratio preserved)
-#define DRAW_H    14.0f    // max height
+#define DRAW_H    12.0f    // max height
 
 // ── Draw motion profile & safety cap ───────────────────────────────────────────
 #define DRAW_MAX_SPEED   1500.0f
@@ -224,12 +224,12 @@ static int circle_intersections(float x0, float y0, float r0,
   return (h < 1e-6f) ? 1 : 2;
 }
 
-// Motor angles (radians, CCW from +X) for a pen target. When a side's target
-// circles intersect twice, prefers the elbow that stays at/above the base line
-// (y >= 0) — for targets close to a base the other branch folds the arm back
-// under the frame, which needs a huge, physically-wrong rotation to reach.
-// Falls back to the outward x-based pick (matching sim/simulator.py) when both
-// candidates land on the same side of the line.
+// Motor angles (radians, CCW from +X) for a pen target. Each side normally has
+// 2 circle-intersection solutions; searches all combinations for one where both
+// elbows stay at/above the base line AND the arms don't cross (left elbow's x <
+// right elbow's x) — the physically sane pose. The drawing area is chosen so
+// this always exists; falls back to the outward x-based pick (matching
+// sim/simulator.py) for any point outside that verified-safe region.
 static bool inverse_kinematics(float px, float py, float* thA, float* thB) {
   const float ax = -LINK_BASE / 2.0f, ay = 0.0f;
   const float bx =  LINK_BASE / 2.0f, by = 0.0f;
@@ -239,16 +239,17 @@ static bool inverse_kinematics(float px, float py, float* thA, float* thB) {
   if (nl == 0 || nr == 0) return false;
 
   float e1x = left[0][0], e1y = left[0][1];
-  if (nl == 2) {
-    bool above0 = left[0][1] >= 0.0f, above1 = left[1][1] >= 0.0f;
-    if (above1 && !above0) { e1x = left[1][0]; e1y = left[1][1]; }
-    else if (above0 == above1 && left[1][0] < e1x) { e1x = left[1][0]; e1y = left[1][1]; }
-  }
+  if (nl == 2 && left[1][0] < e1x) { e1x = left[1][0]; e1y = left[1][1]; }
   float e2x = right[0][0], e2y = right[0][1];
-  if (nr == 2) {
-    bool above0 = right[0][1] >= 0.0f, above1 = right[1][1] >= 0.0f;
-    if (above1 && !above0) { e2x = right[1][0]; e2y = right[1][1]; }
-    else if (above0 == above1 && right[1][0] > e2x) { e2x = right[1][0]; e2y = right[1][1]; }
+  if (nr == 2 && right[1][0] > e2x) { e2x = right[1][0]; e2y = right[1][1]; }
+
+  for (int i = 0; i < nl; i++) {
+    for (int j = 0; j < nr; j++) {
+      if (left[i][1] >= 0.0f && right[j][1] >= 0.0f && left[i][0] < right[j][0]) {
+        e1x = left[i][0]; e1y = left[i][1];
+        e2x = right[j][0]; e2y = right[j][1];
+      }
+    }
   }
 
   *thA = atan2f(e1y - ay, e1x - ax);
