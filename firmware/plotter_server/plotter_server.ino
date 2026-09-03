@@ -230,33 +230,67 @@ static int circle_intersections(float x0, float y0, float r0,
 // right elbow's x) — the physically sane pose. The drawing area is chosen so
 // this always exists; falls back to the outward x-based pick (matching
 // sim/simulator.py) for any point outside that verified-safe region.
-static bool inverse_kinematics(float px, float py, float* thA, float* thB) {
-  const float ax = -LINK_BASE / 2.0f, ay = 0.0f;
-  const float bx =  LINK_BASE / 2.0f, by = 0.0f;
-  float left[2][2], right[2][2];
-  int nl = circle_intersections(ax, ay, LINK_PROX, px, py, LINK_DIST, left);
-  int nr = circle_intersections(bx, by, LINK_PROX, px, py, LINK_DIST, right);
-  if (nl == 0 || nr == 0) return false;
+static bool inverse_kinematics(float px, float py, float* thA, float* thB)
+{
+    const float ax = -LINK_BASE / 2.0f, ay = 0.0f;
+    const float bx =  LINK_BASE / 2.0f, by = 0.0f;
 
-  float e1x = left[0][0], e1y = left[0][1];
-  if (nl == 2 && left[1][0] < e1x) { e1x = left[1][0]; e1y = left[1][1]; }
-  float e2x = right[0][0], e2y = right[0][1];
-  if (nr == 2 && right[1][0] > e2x) { e2x = right[1][0]; e2y = right[1][1]; }
+    float left[2][2], right[2][2];
 
-  for (int i = 0; i < nl; i++) {
-    for (int j = 0; j < nr; j++) {
-      if (left[i][1] >= 0.0f && right[j][1] >= 0.0f && left[i][0] < right[j][0]) {
-        e1x = left[i][0]; e1y = left[i][1];
-        e2x = right[j][0]; e2y = right[j][1];
-      }
+    int nl = circle_intersections(ax, ay, LINK_PROX, px, py, LINK_DIST, left);
+    int nr = circle_intersections(bx, by, LINK_PROX,px, py, LINK_DIST, right);
+
+    if (nl == 0 || nr == 0)
+        return false;
+
+    bool found = false;
+    float bestSeparation = -1.0f;
+
+    float e1x = 0.0f, e1y = 0.0f;
+    float e2x = 0.0f, e2y = 0.0f;
+
+    for (int i = 0; i < nl; i++) {
+        for (int j = 0; j < nr; j++) {
+
+            // Optional configuration constraints
+            if (left[i][1] < 0.0f)
+                continue;
+
+            if (right[j][1] < 0.0f)
+                continue;
+
+            // Prevent crossed elbows
+            if (left[i][0] >= right[j][0])
+                continue;
+
+            // Distance between elbows
+            float dx = right[j][0] - left[i][0];
+            float dy = right[j][1] - left[i][1];
+
+            float separation = dx * dx + dy * dy;
+
+            if (!found || separation > bestSeparation) {
+                bestSeparation = separation;
+
+                e1x = left[i][0];
+                e1y = left[i][1];
+
+                e2x = right[j][0];
+                e2y = right[j][1];
+
+                found = true;
+            }
+        }
     }
-  }
 
-  *thA = atan2f(e1y - ay, e1x - ax);
-  *thB = atan2f(e2y - by, e2x - bx);
-  return true;
+    if (!found)
+        return false;
+
+    *thA = atan2f(e1y - ay, e1x - ax);
+    *thB = atan2f(e2y - by, e2x - bx);
+
+    return true;
 }
-
 // Coordinated blocking move of both arms to target output angles (deg).
 static void move_to_angles(float thetaA_deg, float thetaB_deg) {
   motorA.moveTo(lroundf(thetaA_deg * STEPS_PER_DEG));

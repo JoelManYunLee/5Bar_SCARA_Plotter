@@ -37,8 +37,8 @@ OUTPUTS_FOLDER = os.path.join(BASE_DIR, "outputs")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUTS_FOLDER, exist_ok=True)
 
-# Set PLOTTER_IP env var to enable forwarding: PLOTTER_IP=192.168.1.33 python app.py
-PLOTTER_IP = os.environ.get("PLOTTER_IP", "192.168.1.33")
+# Set PLOTTER_IP env var to enable forwarding: PLOTTER_IP=192.168.1.24 python app.py
+PLOTTER_IP = os.environ.get("PLOTTER_IP", "192.168.1.24")
 PLOTTER_PORT = int(os.environ.get("PLOTTER_PORT", "9000"))
 
 # Known output-shaft angle where each arm's limit switch engages. Until an arm
