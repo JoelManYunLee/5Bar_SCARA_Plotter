@@ -996,6 +996,8 @@
     return homed && deg != null ? `${deg.toFixed(1)}°` : 'unknown';
   }
 
+  let liveMoveActive = false;   // a /device_status poll is currently driving a diagram's pose
+
   function renderPosition(pos) {
     if (!pos) return;
     posReadout.textContent =
@@ -1005,10 +1007,14 @@
     calBadge.textContent = pos.calibrated ? 'calibrated' : 'uncalibrated';
     calBadge.classList.toggle('cal', !!pos.calibrated);
     const homed = pos.a_homed && pos.b_homed && pos.motor_a_deg != null && pos.motor_b_deg != null;
-    calDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
-      'Home both arms to see live angles');
+    // While the arms are actually moving, a /device_status poll owns the pose;
+    // don't overwrite the live angles with the (stale until synced) position.json ones.
+    if (!liveMoveActive) {
+      calDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
+        'Home both arms to see live angles');
+    }
     calDiagram.renderDrawArea(drawArea);
-    if (!ikDragging) {
+    if (!ikDragging && !liveMoveActive) {
       ikDiagram.render(homed ? pos.motor_a_deg : null, homed ? pos.motor_b_deg : null,
         'Home both arms to see live angles');
     }
@@ -1245,8 +1251,10 @@
   // /goto), rendering into the given diagram so the live pose tracks the arms
   // in real time instead of jumping straight to the final pose.
   function pollDeviceMove(diagram) {
+    liveMoveActive = true;
     return new Promise(resolve => {
       let ticks = 0;
+      const finish = () => { clearInterval(timer); liveMoveActive = false; resolve(); };
       const timer = setInterval(async () => {
         ticks++;
         let data;
@@ -1256,11 +1264,11 @@
         } catch (_) {
           data = null;
         }
-        if (!data || !data.ok || !data.live) { clearInterval(timer); resolve(); return; }
+        if (!data || !data.ok || !data.live) { finish(); return; }
         const aDeg = data.a && data.a.homed ? data.a.deg : null;
         const bDeg = data.b && data.b.homed ? data.b.deg : null;
         diagram.render(aDeg, bDeg, 'Home both arms to see live angles');
-        if (!data.moving || ticks > 150) { clearInterval(timer); resolve(); }  // ~30s safety cap
+        if (!data.moving || ticks > 150) finish();  // ~30s safety cap
       }, 200);
     });
   }

@@ -44,6 +44,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <AccelStepper.h>
+#include <MultiStepper.h>
 #include <ESP32Servo.h>
 #include <vector>
 #include <math.h>
@@ -55,14 +56,13 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 
 // ── Drivetrain (TB6600 @ 1/4 microstep, 32:1 harmonic gearbox) ─────────────────
 #define MOTOR_FULL_STEPS   200        // NEMA-17, 1.8° per full step
-#define MICROSTEPS         4          // TB6600 microstep DIP setting
+#define MICROSTEPS         1          // TB6600 microstep DIP setting
 #define GEAR_RATIO         32.0f      // harmonic drive reduction (output : motor)
 
-#define STEPS_PER_REV   (MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO)  // 25600
+#define STEPS_PER_REV   (MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO)
 #define STEPS_PER_DEG   (STEPS_PER_REV / 360.0f)
 
-// Known output-shaft angle where each arm's limit switch engages. Must match
-// LIMIT_A_DEG / LIMIT_B_DEG on the server so hardware and server agree on zero.
+// Known output-shaft angle where each arm's limit switch engages
 #define LIMIT_A_DEG   270.0f
 #define LIMIT_B_DEG   -90.0f
 
@@ -125,6 +125,7 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 
 AccelStepper motorA(AccelStepper::DRIVER, A_STEP_PIN, A_DIR_PIN);
 AccelStepper motorB(AccelStepper::DRIVER, B_STEP_PIN, B_DIR_PIN);
+MultiStepper penMover;
 WebServer    server(HTTP_PORT);
 Preferences  prefs;
 Servo        penServo;
@@ -145,6 +146,7 @@ struct PlotJob {
   uint32_t ptIdx   = 0;
 };
 static PlotJob job;
+static bool plotTargetSet = false;   // a MultiStepper move to job.ptIdx is in flight
 
 struct Arm {
   AccelStepper* stepper;
@@ -342,16 +344,12 @@ static void pen_down(float weight) {
   penDown = true;
 }
 
-// Move the pen to a drawing-space point via IK. Returns false if unreachable.
-static bool move_to_xy(float x, float y) {
+// Step targets (motor A, motor B) for a drawing-space point via IK.
+static bool ik_targets(float x, float y, long out[2]) {
   float ta, tb;
   if (!inverse_kinematics(x, y, &ta, &tb)) return false;
-  motorA.moveTo(lroundf(degrees(ta) * STEPS_PER_DEG));
-  motorB.moveTo(lroundf(degrees(tb) * STEPS_PER_DEG));
-  while (motorA.distanceToGo() != 0 || motorB.distanceToGo() != 0) {
-    motorA.run();
-    motorB.run();
-  }
+  out[0] = lroundf(degrees(ta) * STEPS_PER_DEG);
+  out[1] = lroundf(degrees(tb) * STEPS_PER_DEG);
   return true;
 }
 
@@ -361,31 +359,50 @@ static void plot_finish() {
   motorA.setMaxSpeed(JOG_MAX_SPEED); motorA.setAcceleration(JOG_ACCEL);
   motorB.setMaxSpeed(JOG_MAX_SPEED); motorB.setAcceleration(JOG_ACCEL);
   job.active = false;
+  plotTargetSet = false;
   job.px.clear(); job.py.clear();
   job.pathBegin.clear(); job.pathWeight.clear();
   job.px.shrink_to_fit(); job.py.shrink_to_fit();
   Serial.println("[plot] complete — parked at ready pose");
 }
 
-// Draws one point per call so /position and future controls stay responsive.
+// Streams the current stroke as coordinated constant-speed moves (MultiStepper),
+// so the pen stops only at stroke ends (to lift/lower) and glides straight
+// through every interior point instead of decelerating to a halt at each one.
+// Non-blocking: one MultiStepper tick per loop(), so /position stays live and
+// reports the true pose the moment each move finishes.
 static void plot_step() {
   uint32_t nPts   = job.px.size();
   uint32_t nPaths = job.pathBegin.size();
   if (job.ptIdx >= nPts) { plot_finish(); return; }
 
-  uint32_t pathEnd = (job.pathIdx + 1 < nPaths) ? job.pathBegin[job.pathIdx + 1] : nPts;
-  bool atStart = (job.ptIdx == job.pathBegin[job.pathIdx]);
+  if (plotTargetSet && penMover.run()) return;
 
-  if (atStart && penDown) pen_up();                    // lift before travelling to a new stroke
-  bool reached = move_to_xy(job.px[job.ptIdx], job.py[job.ptIdx]);
-  if (reached && atStart) pen_down(job.pathWeight[job.pathIdx]);
+  if (plotTargetSet) {
+    plotTargetSet = false;
+    bool atStart = (job.ptIdx == job.pathBegin[job.pathIdx]);
+    if (atStart && !penDown) pen_down(job.pathWeight[job.pathIdx]);
 
-  job.ptIdx++;
-  if (job.ptIdx >= pathEnd) {                           // stroke finished
-    if (penDown) pen_up();
-    job.pathIdx++;
-    if (job.pathIdx >= nPaths) plot_finish();
+    job.ptIdx++;
+    uint32_t pathEnd = (job.pathIdx + 1 < nPaths) ? job.pathBegin[job.pathIdx + 1] : nPts;
+    if (job.ptIdx >= pathEnd) {
+      if (penDown) pen_up();
+      job.pathIdx++;
+      if (job.pathIdx >= nPaths) plot_finish();
+    }
+    return;
   }
+
+  // Aim at the next point; lift first if it opens a new stroke.
+  bool atStart = (job.ptIdx == job.pathBegin[job.pathIdx]);
+  if (atStart && penDown) pen_up();                    // pen up before travelling to a new stroke
+  long target[2];
+  if (!ik_targets(job.px[job.ptIdx], job.py[job.ptIdx], target)) {
+    job.ptIdx++;                                        // skip an unreachable point
+    return;
+  }
+  penMover.moveTo(target);
+  plotTargetSet = true;
 }
 
 // Drives the /home travel to (0,0) one AccelStepper tick at a time from
@@ -579,7 +596,7 @@ static void handle_plot() {
 
   motorA.setMaxSpeed(DRAW_MAX_SPEED); motorA.setAcceleration(DRAW_ACCEL);
   motorB.setMaxSpeed(DRAW_MAX_SPEED); motorB.setAcceleration(DRAW_ACCEL);
-  job.pathIdx = 0; job.ptIdx = 0; job.active = true;   // execution runs in loop()
+  job.pathIdx = 0; job.ptIdx = 0; plotTargetSet = false; job.active = true;   // execution runs in loop()
 
   Serial.printf("[plot] accepted %u paths, %u points\n", (unsigned)job.pathBegin.size(), (unsigned)total);
   String body = String("{\"ok\":true,\"accepted\":{\"paths\":") + (unsigned)job.pathBegin.size() +
@@ -610,6 +627,8 @@ void setup() {
   prefs.begin("plotter", false);
   setup_arm(armA);
   setup_arm(armB);
+  penMover.addStepper(motorA);
+  penMover.addStepper(motorB);
 
   ESP32PWM::allocateTimer(0);
   penServo.setPeriodHertz(50);
