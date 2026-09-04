@@ -29,8 +29,8 @@
  *   GET  /position → {ok:true, ready:<bool>, plotting:<bool>, moving:<bool>, a:{homed,deg}, b:{homed,deg}}
  *   GET  /         → health text
  *
- * Drivetrain: NEMA-17 (200 full steps) → TB6600 @ 1/4 microstep → 32:1 harmonic.
- *   STEPS_PER_REV = 200 * 4 * 32 = 25600 steps per output-shaft revolution.
+ * Drivetrain: NEMA-17 (200 full steps) → TB6600 @ 1/8 microstep → 32:1 harmonic.
+ *   STEPS_PER_REV = 200 * 8 * 32 = 51200 steps per output-shaft revolution.
  *
  * Dependencies (Arduino IDE → Library Manager / Boards Manager):
  *   • esp32 board package  (WiFi, WebServer, Preferences)
@@ -54,9 +54,9 @@ static const char*    WIFI_SSID = "lion";
 static const char*    WIFI_PASS = "shawn429";
 static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the server
 
-// ── Drivetrain (TB6600 @ 1/4 microstep, 32:1 harmonic gearbox) ─────────────────
+// ── Drivetrain (TB6600 @ 1/8 microstep, 32:1 harmonic gearbox) ─────────────────
 #define MOTOR_FULL_STEPS   200        // NEMA-17, 1.8° per full step
-#define MICROSTEPS         1          // TB6600 microstep DIP setting
+#define MICROSTEPS         8          // TB6600 microstep DIP setting
 #define GEAR_RATIO         32.0f      // harmonic drive reduction (output : motor)
 
 #define STEPS_PER_REV   (MOTOR_FULL_STEPS * MICROSTEPS * GEAR_RATIO)
@@ -98,8 +98,8 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 #define LIMIT_ACTIVE_LOW   1
 
 // ── Jog motion profile ─────────────────────────────────────────────────────────
-#define JOG_MAX_SPEED   2000.0f   // steps/s (slow enough to catch the switch)
-#define JOG_ACCEL       4000.0f   // steps/s²
+#define JOG_MAX_SPEED   16000.0f  // steps/s (~112°/s output; slow enough to catch the switch)
+#define JOG_ACCEL       32000.0f  // steps/s²
 
 // ── Pen lift servo ─────────────────────────────────────────────────────────────
 #define PEN_SERVO_PIN     13
@@ -117,8 +117,8 @@ static const uint16_t HTTP_PORT = 9000;   // must match PLOTTER_PORT on the serv
 #define DRAW_H    12.0f    // max height
 
 // ── Draw motion profile & safety cap ───────────────────────────────────────────
-#define DRAW_MAX_SPEED   1500.0f
-#define DRAW_ACCEL       3000.0f
+#define DRAW_MAX_SPEED   12000.0f  // steps/s (~84°/s output; near the ESP32 step-rate ceiling)
+#define DRAW_ACCEL       24000.0f
 #define MAX_PLOT_POINTS  3000     // guard ESP32 RAM; lower server detail if exceeded
 
 // ─────────────────────────────────────────────────────────────────────────────
